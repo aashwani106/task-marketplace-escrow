@@ -3,6 +3,7 @@ use anchor_lang::prelude::*;
 use crate::{
     constants::*,
     error::ErrorCode,
+    events::TaskCreated,
     state::{CreatorProfile, Task, TaskStatus},
 };
 
@@ -58,6 +59,9 @@ pub fn handle_create_task(
         ErrorCode::InvalidDescription
     );
 
+    let timestamp = Clock::get()?.unix_timestamp;
+    let creator = ctx.accounts.creator.key();
+    let task_key = ctx.accounts.task.key();
     let creator_profile = &mut ctx.accounts.creator_profile;
     let task = &mut ctx.accounts.task;
 
@@ -72,7 +76,7 @@ pub fn handle_create_task(
     );
 
     task.task_number = task_number;
-    task.creator = ctx.accounts.creator.key();
+    task.creator = creator;
     task.worker = None;
     task.title = title;
     task.description = description;
@@ -84,8 +88,16 @@ pub fn handle_create_task(
     task.review_deadline = None;
 
     creator_profile.task_count = task_number;
+    task.validate_invariants()?;
 
-    msg!("Task created: {}", task.task_number);
+    emit!(TaskCreated {
+        version: EVENT_VERSION,
+        task: task_key,
+        creator,
+        actor: creator,
+        created_at: timestamp,
+        reward_amount,
+    });
 
     Ok(())
 }

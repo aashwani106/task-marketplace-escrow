@@ -1,8 +1,9 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED},
+    constants::{EVENT_VERSION, TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED},
     error::ErrorCode,
+    events::TaskSettledAfterTimeout,
     state::{EscrowVault, ResolutionState, Task, TaskResolution},
 };
 
@@ -11,6 +12,8 @@ use super::resolution::validate_task_resolution;
 
 #[derive(Accounts)]
 pub struct SettleTaskAfterTimeout<'info> {
+    pub actor: Signer<'info>,
+
     #[account(
         mut,
         seeds = [
@@ -64,6 +67,25 @@ pub fn handle_settle_task_after_timeout(ctx: Context<SettleTaskAfterTimeout>) ->
     }
 
     let timestamp = Clock::get()?.unix_timestamp;
+    let review_deadline = ctx
+        .accounts
+        .task
+        .review_deadline
+        .ok_or(ErrorCode::InvalidStateTransition)?;
+    let reward_amount = ctx.accounts.escrow_vault.escrowed_lamports;
     ctx.accounts.task.pay_after_timeout(timestamp)?;
-    pay_worker(&ctx.accounts.escrow_vault, &ctx.accounts.worker)
+    pay_worker(&ctx.accounts.escrow_vault, &ctx.accounts.worker)?;
+
+    emit!(TaskSettledAfterTimeout {
+        version: EVENT_VERSION,
+        task: ctx.accounts.task.key(),
+        creator: ctx.accounts.creator.key(),
+        worker: ctx.accounts.worker.key(),
+        actor: ctx.accounts.actor.key(),
+        settled_at: timestamp,
+        review_deadline,
+        reward_amount,
+    });
+
+    Ok(())
 }

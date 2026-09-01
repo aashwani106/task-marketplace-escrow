@@ -1,8 +1,9 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED},
+    constants::{EVENT_VERSION, TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED},
     error::ErrorCode,
+    events::DisputeSettledAfterTimeout,
     state::{DisputeOutcome, EscrowVault, Task, TaskResolution},
 };
 
@@ -10,6 +11,8 @@ use super::resolution::{settle_dispute, validate_dispute_accounts};
 
 #[derive(Accounts)]
 pub struct SettleDisputeAfterTimeout<'info> {
+    pub actor: Signer<'info>,
+
     #[account(
         mut,
         seeds = [
@@ -54,6 +57,7 @@ pub fn handle_settle_dispute_after_timeout(ctx: Context<SettleDisputeAfterTimeou
         ctx.accounts.worker.key(),
     )?;
     let timestamp = Clock::get()?.unix_timestamp;
+    let reward_amount = ctx.accounts.escrow_vault.escrowed_lamports;
     ctx.accounts
         .task_resolution
         .settle_after_timeout(timestamp)?;
@@ -62,5 +66,18 @@ pub fn handle_settle_dispute_after_timeout(ctx: Context<SettleDisputeAfterTimeou
         &ctx.accounts.escrow_vault,
         &ctx.accounts.worker,
         DisputeOutcome::PayWorker,
-    )
+    )?;
+
+    emit!(DisputeSettledAfterTimeout {
+        version: EVENT_VERSION,
+        task: ctx.accounts.task.key(),
+        creator: ctx.accounts.creator.key(),
+        worker: ctx.accounts.worker.key(),
+        actor: ctx.accounts.actor.key(),
+        settled_at: timestamp,
+        reward_amount,
+        outcome: DisputeOutcome::PayWorker,
+    });
+
+    Ok(())
 }

@@ -13,10 +13,19 @@ pub const VAULT_SEED: &[u8] = b"vault";
 pub const TASK_RESOLUTION_SEED: &[u8] = b"task_resolution";
 
 #[constant]
+pub const WORKER_ASSIGNMENT_SEED: &[u8] = b"worker_assignment";
+
+#[constant]
 pub const ESCROW_VAULT_VERSION: u8 = 1;
 
 #[constant]
 pub const TASK_RESOLUTION_VERSION: u8 = 1;
+
+#[constant]
+pub const WORKER_ASSIGNMENT_VERSION: u8 = 1;
+
+#[constant]
+pub const EVENT_VERSION: u8 = 1;
 
 pub const MAX_SUBMISSION_REFERENCE_LENGTH: usize = 200;
 pub const MAX_REJECTION_REFERENCE_LENGTH: usize = 200;

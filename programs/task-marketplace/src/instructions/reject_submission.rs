@@ -1,8 +1,9 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{TASK_RESOLUTION_SEED, TASK_SEED},
+    constants::{EVENT_VERSION, TASK_RESOLUTION_SEED, TASK_SEED},
     error::ErrorCode,
+    events::SubmissionRejected,
     state::{Task, TaskResolution},
 };
 
@@ -41,5 +42,27 @@ pub fn handle_reject_submission(
     ctx.accounts.task.reject_submission(timestamp)?;
     ctx.accounts
         .task_resolution
-        .open_dispute(timestamp, rejection_reference)
+        .open_dispute(timestamp, rejection_reference)?;
+    let worker = ctx
+        .accounts
+        .task
+        .worker
+        .ok_or(ErrorCode::InvalidStateTransition)?;
+    let arbitration_deadline = ctx
+        .accounts
+        .task_resolution
+        .arbitration_deadline
+        .ok_or(ErrorCode::InvalidResolutionState)?;
+
+    emit!(SubmissionRejected {
+        version: EVENT_VERSION,
+        task: ctx.accounts.task.key(),
+        creator: ctx.accounts.creator.key(),
+        worker,
+        actor: ctx.accounts.creator.key(),
+        rejected_at: timestamp,
+        arbitration_deadline,
+    });
+
+    Ok(())
 }

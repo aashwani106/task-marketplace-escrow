@@ -1,7 +1,6 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::TASK_RESOLUTION_VERSION,
     error::ErrorCode,
     state::{DisputeOutcome, EscrowVault, Task, TaskResolution},
 };
@@ -12,11 +11,8 @@ pub fn validate_task_resolution(
     task: &Account<Task>,
     task_resolution: &Account<TaskResolution>,
 ) -> Result<()> {
-    require_eq!(
-        task_resolution.version,
-        TASK_RESOLUTION_VERSION,
-        ErrorCode::InvalidResolutionVersion
-    );
+    task.validate_invariants()?;
+    task_resolution.validate_invariants()?;
     require_keys_eq!(
         task_resolution.task,
         task.key(),

@@ -1,11 +1,13 @@
 pub mod constants;
 pub mod error;
+pub mod events;
 pub mod instructions;
 pub mod state;
 
 use anchor_lang::prelude::*;
 
 pub use constants::*;
+pub use events::*;
 pub use instructions::*;
 pub use state::*;
 
@@ -17,6 +19,14 @@ pub mod task_marketplace {
 
     pub fn accept_task(ctx: Context<AcceptTask>) -> Result<()> {
         crate::instructions::accept_task::handle_accept_task(ctx)
+    }
+
+    pub fn accept_assignment(ctx: Context<AcceptAssignment>) -> Result<()> {
+        crate::instructions::accept_assignment::handle_accept_assignment(ctx)
+    }
+
+    pub fn assign_worker(ctx: Context<AssignWorker>, selected_worker: Pubkey) -> Result<()> {
+        crate::instructions::assign_worker::handle_assign_worker(ctx, selected_worker)
     }
 
     pub fn cancel_task(ctx: Context<CancelTask>) -> Result<()> {

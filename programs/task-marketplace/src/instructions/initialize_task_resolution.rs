@@ -1,8 +1,9 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{TASK_RESOLUTION_SEED, TASK_RESOLUTION_VERSION, TASK_SEED},
+    constants::{EVENT_VERSION, TASK_RESOLUTION_SEED, TASK_RESOLUTION_VERSION, TASK_SEED},
     error::ErrorCode,
+    events::TaskResolutionInitialized,
     state::{ResolutionState, Task, TaskResolution, TaskStatus},
 };
 
@@ -54,10 +55,13 @@ pub fn handle_initialize_task_resolution(
         ErrorCode::InvalidArbitrationAuthority
     );
 
+    let timestamp = Clock::get()?.unix_timestamp;
+    let task_key = ctx.accounts.task.key();
+    let creator = ctx.accounts.creator.key();
     let task_resolution = &mut ctx.accounts.task_resolution;
     task_resolution.version = TASK_RESOLUTION_VERSION;
     task_resolution.bump = ctx.bumps.task_resolution;
-    task_resolution.task = ctx.accounts.task.key();
+    task_resolution.task = task_key;
     task_resolution.arbitration_authority = arbitration_authority;
     task_resolution.arbitration_fee_lamports = arbitration_fee_lamports;
     task_resolution.state = ResolutionState::Ready;
@@ -66,6 +70,17 @@ pub fn handle_initialize_task_resolution(
     task_resolution.rejection_reference = None;
     task_resolution.outcome = None;
     task_resolution.reserved = [0; 64];
+    task_resolution.validate_invariants()?;
+
+    emit!(TaskResolutionInitialized {
+        version: EVENT_VERSION,
+        task: task_key,
+        creator,
+        actor: creator,
+        arbitration_authority,
+        arbitration_fee_lamports,
+        initialized_at: timestamp,
+    });
 
     Ok(())
 }

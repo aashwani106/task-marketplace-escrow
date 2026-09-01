@@ -4,10 +4,11 @@ use std::path::PathBuf;
 
 use anchor_lang::{
     prelude::{Clock, Pubkey},
-    AccountDeserialize, AccountSerialize, InstructionData, ToAccountMetas,
+    AccountDeserialize, AccountSerialize, Event, InstructionData, ToAccountMetas,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use litesvm::{
-    types::{FailedTransactionMetadata, TransactionResult},
+    types::{FailedTransactionMetadata, TransactionMetadata, TransactionResult},
     LiteSVM,
 };
 use solana_keypair::Keypair;
@@ -16,8 +17,9 @@ use solana_signer::Signer;
 use solana_transaction::{Instruction, InstructionError, Transaction, TransactionError};
 use task_marketplace::{
     accounts, instruction,
-    state::{CreatorProfile, DisputeOutcome, EscrowVault, Task, TaskResolution},
+    state::{CreatorProfile, DisputeOutcome, EscrowVault, Task, TaskResolution, WorkerAssignment},
     CREATOR_PROFILE_SEED, ESCROW_VAULT_VERSION, TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED,
+    WORKER_ASSIGNMENT_SEED,
 };
 
 pub const DEFAULT_BALANCE: u64 = 10_000_000_000;
@@ -86,6 +88,13 @@ pub fn task_resolution_pda(task: &Pubkey) -> (Pubkey, u8) {
     )
 }
 
+pub fn worker_assignment_pda(task: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[WORKER_ASSIGNMENT_SEED, task.as_ref()],
+        &task_marketplace::ID,
+    )
+}
+
 pub fn create_creator_profile_instruction(creator: Pubkey, creator_profile: Pubkey) -> Instruction {
     Instruction {
         program_id: task_marketplace::ID,
@@ -133,6 +142,42 @@ pub fn accept_task_instruction(worker: Pubkey, task: Pubkey) -> Instruction {
         program_id: task_marketplace::ID,
         accounts: accounts::AcceptTask { worker, task }.to_account_metas(None),
         data: instruction::AcceptTask {}.data(),
+    }
+}
+
+pub fn assign_worker_instruction(
+    creator: Pubkey,
+    task: Pubkey,
+    worker_assignment: Pubkey,
+    selected_worker: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: task_marketplace::ID,
+        accounts: accounts::AssignWorker {
+            creator,
+            task,
+            worker_assignment,
+            system_program: anchor_lang::system_program::ID,
+        }
+        .to_account_metas(None),
+        data: instruction::AssignWorker { selected_worker }.data(),
+    }
+}
+
+pub fn accept_assignment_instruction(
+    worker: Pubkey,
+    task: Pubkey,
+    worker_assignment: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: task_marketplace::ID,
+        accounts: accounts::AcceptAssignment {
+            worker,
+            task,
+            worker_assignment,
+        }
+        .to_account_metas(None),
+        data: instruction::AcceptAssignment {}.data(),
     }
 }
 
@@ -286,6 +331,7 @@ pub fn resolve_dispute_by_agreement_instruction(
 }
 
 pub fn settle_dispute_after_timeout_instruction(
+    actor: Pubkey,
     task: Pubkey,
     creator: Pubkey,
     worker: Pubkey,
@@ -295,6 +341,7 @@ pub fn settle_dispute_after_timeout_instruction(
     Instruction {
         program_id: task_marketplace::ID,
         accounts: accounts::SettleDisputeAfterTimeout {
+            actor,
             task,
             creator,
             worker,
@@ -307,6 +354,7 @@ pub fn settle_dispute_after_timeout_instruction(
 }
 
 pub fn settle_task_after_timeout_instruction(
+    actor: Pubkey,
     task: Pubkey,
     creator: Pubkey,
     worker: Pubkey,
@@ -315,6 +363,7 @@ pub fn settle_task_after_timeout_instruction(
     Instruction {
         program_id: task_marketplace::ID,
         accounts: accounts::SettleTaskAfterTimeout {
+            actor,
             task,
             creator,
             worker,
@@ -327,6 +376,7 @@ pub fn settle_task_after_timeout_instruction(
 }
 
 pub fn settle_task_after_timeout_with_resolution_instruction(
+    actor: Pubkey,
     task: Pubkey,
     creator: Pubkey,
     worker: Pubkey,
@@ -336,6 +386,7 @@ pub fn settle_task_after_timeout_with_resolution_instruction(
     Instruction {
         program_id: task_marketplace::ID,
         accounts: accounts::SettleTaskAfterTimeout {
+            actor,
             task,
             creator,
             worker,
@@ -442,6 +493,38 @@ pub fn accept_task(svm: &mut LiteSVM, worker: &Keypair, task: Pubkey) {
         svm,
         worker,
         accept_task_instruction(worker.pubkey(), task),
+        &[],
+    )
+    .unwrap();
+}
+
+pub fn assign_worker(
+    svm: &mut LiteSVM,
+    creator: &Keypair,
+    task: Pubkey,
+    selected_worker: Pubkey,
+) -> Pubkey {
+    let worker_assignment = worker_assignment_pda(&task).0;
+    send_instruction(
+        svm,
+        creator,
+        assign_worker_instruction(creator.pubkey(), task, worker_assignment, selected_worker),
+        &[],
+    )
+    .unwrap();
+    worker_assignment
+}
+
+pub fn accept_assignment(
+    svm: &mut LiteSVM,
+    worker: &Keypair,
+    task: Pubkey,
+    worker_assignment: Pubkey,
+) {
+    send_instruction(
+        svm,
+        worker,
+        accept_assignment_instruction(worker.pubkey(), task, worker_assignment),
         &[],
     )
     .unwrap();
@@ -560,6 +643,10 @@ pub fn fetch_task_resolution(svm: &LiteSVM, address: &Pubkey) -> TaskResolution 
     fetch_anchor_account(svm, address)
 }
 
+pub fn fetch_worker_assignment(svm: &LiteSVM, address: &Pubkey) -> WorkerAssignment {
+    fetch_anchor_account(svm, address)
+}
+
 pub fn overwrite_task(svm: &mut LiteSVM, address: Pubkey, task: &Task) {
     let mut account = svm.get_account(&address).unwrap();
     let account_size = account.data.len();
@@ -591,6 +678,21 @@ pub fn overwrite_task_resolution(
     let account_size = account.data.len();
     let mut data = Vec::with_capacity(account_size);
     task_resolution.try_serialize(&mut data).unwrap();
+    assert!(data.len() <= account_size);
+    data.resize(account_size, 0);
+    account.data = data;
+    svm.set_account(address, account).unwrap();
+}
+
+pub fn overwrite_worker_assignment(
+    svm: &mut LiteSVM,
+    address: Pubkey,
+    worker_assignment: &WorkerAssignment,
+) {
+    let mut account = svm.get_account(&address).unwrap();
+    let account_size = account.data.len();
+    let mut data = Vec::with_capacity(account_size);
+    worker_assignment.try_serialize(&mut data).unwrap();
     assert!(data.len() <= account_size);
     data.resize(account_size, 0);
     account.data = data;
@@ -669,6 +771,20 @@ pub fn assert_framework_error(
     expected: anchor_lang::error::ErrorCode,
 ) {
     assert_custom_error(error, framework_error_number(expected));
+}
+
+pub fn assert_event<T: Event>(metadata: &TransactionMetadata, expected: &T) {
+    let expected_data = expected.data();
+    let found = metadata.logs.iter().any(|log| {
+        log.strip_prefix("Program data: ")
+            .and_then(|encoded| BASE64_STANDARD.decode(encoded).ok())
+            .is_some_and(|data| data == expected_data)
+    });
+    assert!(
+        found,
+        "expected event was not emitted; logs:\n{}",
+        metadata.pretty_logs()
+    );
 }
 
 pub fn assert_vault_solvent(svm: &LiteSVM, vault_address: &Pubkey) {

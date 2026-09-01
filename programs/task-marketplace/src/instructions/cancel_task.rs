@@ -1,6 +1,11 @@
 use anchor_lang::prelude::*;
 
-use crate::{constants::TASK_SEED, error::ErrorCode, state::Task};
+use crate::{
+    constants::{EVENT_VERSION, TASK_SEED},
+    error::ErrorCode,
+    events::TaskCancelled,
+    state::Task,
+};
 
 #[derive(Accounts)]
 pub struct CancelTask<'info> {
@@ -21,5 +26,17 @@ pub struct CancelTask<'info> {
 }
 
 pub fn handle_cancel_task(ctx: Context<CancelTask>) -> Result<()> {
-    ctx.accounts.task.cancel()
+    let timestamp = Clock::get()?.unix_timestamp;
+    ctx.accounts.task.cancel()?;
+
+    emit!(TaskCancelled {
+        version: EVENT_VERSION,
+        task: ctx.accounts.task.key(),
+        creator: ctx.accounts.task.creator,
+        worker: ctx.accounts.task.worker,
+        actor: ctx.accounts.creator.key(),
+        cancelled_at: timestamp,
+    });
+
+    Ok(())
 }

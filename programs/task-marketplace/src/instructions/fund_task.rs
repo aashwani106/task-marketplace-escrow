@@ -1,8 +1,9 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{ESCROW_VAULT_VERSION, TASK_SEED, VAULT_SEED},
+    constants::{ESCROW_VAULT_VERSION, EVENT_VERSION, TASK_SEED, VAULT_SEED},
     error::ErrorCode,
+    events::TaskFunded,
     state::{EscrowVault, Task},
 };
 
@@ -69,6 +70,27 @@ pub fn handle_fund_task(ctx: Context<FundTask>) -> Result<()> {
         required_balance,
         ErrorCode::EscrowBalanceMismatch
     );
+
+    let worker = ctx
+        .accounts
+        .task
+        .worker
+        .ok_or(ErrorCode::InvalidStateTransition)?;
+    let submission_deadline = ctx
+        .accounts
+        .task
+        .submission_deadline
+        .ok_or(ErrorCode::InvalidStateTransition)?;
+    emit!(TaskFunded {
+        version: EVENT_VERSION,
+        task: task_key,
+        creator: ctx.accounts.creator.key(),
+        worker,
+        actor: ctx.accounts.creator.key(),
+        funded_at: timestamp,
+        submission_deadline,
+        reward_amount,
+    });
 
     Ok(())
 }

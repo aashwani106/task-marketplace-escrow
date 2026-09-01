@@ -7,6 +7,7 @@ use crate::{
 };
 
 pub fn validate_escrow(task: &Account<Task>, escrow_vault: &Account<EscrowVault>) -> Result<()> {
+    task.validate_invariants()?;
     require_eq!(
         escrow_vault.version,
         ESCROW_VAULT_VERSION,

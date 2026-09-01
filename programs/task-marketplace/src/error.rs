@@ -52,4 +52,12 @@ pub enum ErrorCode {
     ArbitrationDeadlineNotReached,
     #[msg("The arbitration window has expired")]
     ArbitrationWindowExpired,
+    #[msg("Worker assignment version is invalid")]
+    InvalidAssignmentVersion,
+    #[msg("Worker assignment does not belong to the task")]
+    InvalidAssignmentTask,
+    #[msg("The selected worker is invalid")]
+    InvalidSelectedWorker,
+    #[msg("The worker assignment state is invalid")]
+    InvalidAssignmentState,
 }

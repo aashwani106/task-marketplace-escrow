@@ -1,8 +1,9 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{TASK_SEED, VAULT_SEED},
+    constants::{EVENT_VERSION, TASK_SEED, VAULT_SEED},
     error::ErrorCode,
+    events::TaskPaid,
     state::{EscrowVault, Task},
 };
 
@@ -55,6 +56,20 @@ pub fn handle_pay_task(ctx: Context<PayTask>) -> Result<()> {
         ErrorCode::Unauthorized
     );
 
+    let timestamp = Clock::get()?.unix_timestamp;
+    let reward_amount = ctx.accounts.escrow_vault.escrowed_lamports;
     ctx.accounts.task.pay()?;
-    pay_worker(&ctx.accounts.escrow_vault, &ctx.accounts.worker)
+    pay_worker(&ctx.accounts.escrow_vault, &ctx.accounts.worker)?;
+
+    emit!(TaskPaid {
+        version: EVENT_VERSION,
+        task: ctx.accounts.task.key(),
+        creator: ctx.accounts.creator.key(),
+        worker: stored_worker,
+        actor: ctx.accounts.creator.key(),
+        paid_at: timestamp,
+        reward_amount,
+    });
+
+    Ok(())
 }

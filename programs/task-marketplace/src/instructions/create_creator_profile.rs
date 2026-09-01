@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::{constants::*, state::CreatorProfile};
+use crate::{constants::*, events::CreatorProfileCreated, state::CreatorProfile};
 
 #[derive(Accounts)]
 pub struct CreateCreatorProfile<'info> {
@@ -23,10 +23,20 @@ pub struct CreateCreatorProfile<'info> {
 }
 
 pub fn handle_create_creator_profile(ctx: Context<CreateCreatorProfile>) -> Result<()> {
+    let timestamp = Clock::get()?.unix_timestamp;
+    let creator = ctx.accounts.creator.key();
     let creator_profile = &mut ctx.accounts.creator_profile;
 
-    creator_profile.creator = ctx.accounts.creator.key();
+    creator_profile.creator = creator;
     creator_profile.task_count = 0;
+
+    emit!(CreatorProfileCreated {
+        version: EVENT_VERSION,
+        creator_profile: creator_profile.key(),
+        creator,
+        actor: creator,
+        created_at: timestamp,
+    });
 
     Ok(())
 }

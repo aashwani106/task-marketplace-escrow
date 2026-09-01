@@ -1,8 +1,9 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED},
+    constants::{EVENT_VERSION, TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED},
     error::ErrorCode,
+    events::DisputeResolvedByAgreement,
     state::{DisputeOutcome, EscrowVault, Task, TaskResolution},
 };
 
@@ -60,11 +61,26 @@ pub fn handle_resolve_dispute_by_agreement(
         ctx.accounts.creator.key(),
         ctx.accounts.worker.key(),
     )?;
+    let timestamp = Clock::get()?.unix_timestamp;
+    let reward_amount = ctx.accounts.escrow_vault.escrowed_lamports;
     ctx.accounts.task_resolution.resolve_by_agreement(outcome)?;
     settle_dispute(
         &mut ctx.accounts.task,
         &ctx.accounts.escrow_vault,
         &ctx.accounts.worker,
         outcome,
-    )
+    )?;
+
+    emit!(DisputeResolvedByAgreement {
+        version: EVENT_VERSION,
+        task: ctx.accounts.task.key(),
+        creator: ctx.accounts.creator.key(),
+        worker: ctx.accounts.worker.key(),
+        actor: ctx.accounts.creator.key(),
+        resolved_at: timestamp,
+        reward_amount,
+        outcome,
+    });
+
+    Ok(())
 }

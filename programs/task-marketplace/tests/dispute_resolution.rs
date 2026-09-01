@@ -618,6 +618,7 @@ fn permissionless_timeout_pays_worker_at_boundary() {
         &mut fixture.svm,
         &settler,
         settle_dispute_after_timeout_instruction(
+            settler.pubkey(),
             fixture.task,
             fixture.creator.pubkey(),
             fixture.worker.pubkey(),
@@ -658,6 +659,7 @@ fn timeout_before_deadline_and_insolvency_are_atomic() {
         &mut fixture.svm,
         &settler,
         settle_dispute_after_timeout_instruction(
+            settler.pubkey(),
             fixture.task,
             fixture.creator.pubkey(),
             fixture.worker.pubkey(),
@@ -689,6 +691,7 @@ fn timeout_before_deadline_and_insolvency_are_atomic() {
         &mut fixture.svm,
         &settler,
         settle_dispute_after_timeout_instruction(
+            settler.pubkey(),
             fixture.task,
             fixture.creator.pubkey(),
             fixture.worker.pubkey(),
@@ -720,6 +723,7 @@ fn ordinary_timeout_settlement_rejects_disputed_resolution() {
         &mut fixture.svm,
         &settler,
         settle_task_after_timeout_with_resolution_instruction(
+            settler.pubkey(),
             fixture.task,
             fixture.creator.pubkey(),
             fixture.worker.pubkey(),
@@ -749,6 +753,7 @@ fn ready_resolution_allows_normal_timeout_settlement() {
         &mut fixture.svm,
         &settler,
         settle_task_after_timeout_with_resolution_instruction(
+            settler.pubkey(),
             fixture.task,
             fixture.creator.pubkey(),
             fixture.worker.pubkey(),

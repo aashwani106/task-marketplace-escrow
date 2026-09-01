@@ -1,4 +1,6 @@
+pub mod accept_assignment;
 pub mod accept_task;
+pub mod assign_worker;
 pub mod cancel_task;
 pub mod create_creator_profile;
 pub mod create_task;
@@ -15,7 +17,9 @@ pub mod settle_dispute_after_timeout;
 pub mod settle_task_after_timeout;
 pub mod submit_task;
 
+pub use accept_assignment::*;
 pub use accept_task::*;
+pub use assign_worker::*;
 pub use cancel_task::*;
 pub use create_creator_profile::*;
 pub use create_task::*;

@@ -47,7 +47,13 @@ fn arbitrary_payer_settles_at_review_deadline() {
     let metadata = send_instruction(
         &mut svm,
         &settler,
-        settle_task_after_timeout_instruction(task, creator.pubkey(), worker.pubkey(), vault),
+        settle_task_after_timeout_instruction(
+            settler.pubkey(),
+            task,
+            creator.pubkey(),
+            worker.pubkey(),
+            vault,
+        ),
         &[],
     )
     .unwrap();
@@ -135,7 +141,13 @@ fn settlement_replay_fails() {
     send_instruction(
         &mut svm,
         &settler,
-        settle_task_after_timeout_instruction(task, creator.pubkey(), worker.pubkey(), vault),
+        settle_task_after_timeout_instruction(
+            settler.pubkey(),
+            task,
+            creator.pubkey(),
+            worker.pubkey(),
+            vault,
+        ),
         &[],
     )
     .unwrap();
@@ -145,7 +157,13 @@ fn settlement_replay_fails() {
     let error = send_instruction(
         &mut svm,
         &settler,
-        settle_task_after_timeout_instruction(task, creator.pubkey(), worker.pubkey(), vault),
+        settle_task_after_timeout_instruction(
+            settler.pubkey(),
+            task,
+            creator.pubkey(),
+            worker.pubkey(),
+            vault,
+        ),
         &[],
     )
     .unwrap_err();
@@ -254,7 +272,13 @@ fn donation_surplus_goes_to_creator() {
     send_instruction(
         &mut svm,
         &settler,
-        settle_task_after_timeout_instruction(task, creator.pubkey(), worker.pubkey(), vault),
+        settle_task_after_timeout_instruction(
+            settler.pubkey(),
+            task,
+            creator.pubkey(),
+            worker.pubkey(),
+            vault,
+        ),
         &[],
     )
     .unwrap();
@@ -297,7 +321,13 @@ fn creator_payment_and_timeout_settlement_races_are_safe() {
     let error = send_instruction(
         &mut svm,
         &settler,
-        settle_task_after_timeout_instruction(task, creator.pubkey(), worker.pubkey(), vault),
+        settle_task_after_timeout_instruction(
+            settler.pubkey(),
+            task,
+            creator.pubkey(),
+            worker.pubkey(),
+            vault,
+        ),
         &[],
     )
     .unwrap_err();
@@ -312,7 +342,13 @@ fn creator_payment_and_timeout_settlement_races_are_safe() {
     send_instruction(
         &mut svm,
         &settler,
-        settle_task_after_timeout_instruction(task, creator.pubkey(), worker.pubkey(), vault),
+        settle_task_after_timeout_instruction(
+            settler.pubkey(),
+            task,
+            creator.pubkey(),
+            worker.pubkey(),
+            vault,
+        ),
         &[],
     )
     .unwrap();
@@ -348,7 +384,7 @@ fn assert_failing_settlement(
     let error = send_instruction(
         svm,
         payer,
-        settle_task_after_timeout_instruction(task, creator, worker, vault),
+        settle_task_after_timeout_instruction(payer.pubkey(), task, creator, worker, vault),
         &[],
     )
     .unwrap_err();

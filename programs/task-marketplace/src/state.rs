@@ -4,6 +4,7 @@ use crate::{
     constants::{
         ARBITRATION_TIMEOUT_SECONDS, MAX_REJECTION_REFERENCE_LENGTH,
         MAX_SUBMISSION_REFERENCE_LENGTH, REVIEW_TIMEOUT_SECONDS, SUBMISSION_TIMEOUT_SECONDS,
+        TASK_RESOLUTION_VERSION, WORKER_ASSIGNMENT_VERSION,
     },
     error::ErrorCode,
 };
@@ -42,6 +43,18 @@ pub struct TaskResolution {
     pub reserved: [u8; 64],
 }
 
+#[account]
+#[derive(InitSpace)]
+pub struct WorkerAssignment {
+    pub version: u8,
+    pub bump: u8,
+    pub task: Pubkey,
+    pub selected_worker: Pubkey,
+    pub assigned_at: i64,
+    pub accepted_at: Option<i64>,
+    pub reserved: [u8; 64],
+}
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
 pub enum ResolutionState {
     Ready,
@@ -65,6 +78,7 @@ pub enum TaskStatus {
     Cancelled,
     Disputed,
     Refunded,
+    Assigned,
 }
 
 impl TaskStatus {
@@ -113,7 +127,104 @@ pub struct Task {
 }
 
 impl Task {
+    pub fn validate_invariants(&self) -> Result<()> {
+        match self.status {
+            TaskStatus::Open => {
+                require!(self.worker.is_none(), ErrorCode::InvalidStateTransition);
+                require!(self.funded_at.is_none(), ErrorCode::InvalidStateTransition);
+                require!(
+                    self.submission_deadline.is_none(),
+                    ErrorCode::InvalidStateTransition
+                );
+                require!(
+                    self.review_deadline.is_none(),
+                    ErrorCode::InvalidStateTransition
+                );
+                require!(
+                    self.submission_reference.is_none(),
+                    ErrorCode::InvalidStateTransition
+                );
+            }
+            TaskStatus::Assigned => {
+                require!(self.worker.is_none(), ErrorCode::InvalidStateTransition);
+            }
+            TaskStatus::Accepted => {
+                require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+                require!(self.funded_at.is_none(), ErrorCode::InvalidStateTransition);
+                require!(
+                    self.submission_reference.is_none(),
+                    ErrorCode::InvalidStateTransition
+                );
+            }
+            TaskStatus::Funded => {
+                require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+                require!(self.funded_at.is_some(), ErrorCode::InvalidStateTransition);
+                require!(
+                    self.submission_deadline.is_some(),
+                    ErrorCode::InvalidStateTransition
+                );
+                require!(
+                    self.review_deadline.is_none(),
+                    ErrorCode::InvalidStateTransition
+                );
+                require!(
+                    self.submission_reference.is_none(),
+                    ErrorCode::InvalidStateTransition
+                );
+            }
+            TaskStatus::Submitted | TaskStatus::Disputed => {
+                require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+                require!(self.funded_at.is_some(), ErrorCode::InvalidStateTransition);
+                require!(
+                    self.submission_deadline.is_some(),
+                    ErrorCode::InvalidStateTransition
+                );
+                require!(
+                    self.review_deadline.is_some(),
+                    ErrorCode::InvalidStateTransition
+                );
+                require!(
+                    self.submission_reference.is_some(),
+                    ErrorCode::InvalidStateTransition
+                );
+            }
+            TaskStatus::Paid => {
+                require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+                require!(
+                    self.submission_reference.is_some(),
+                    ErrorCode::InvalidStateTransition
+                );
+            }
+            TaskStatus::Refunded => {
+                require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+            }
+            TaskStatus::Cancelled => {
+                // Historical cancellation shapes are either pre-funding (both funding fields
+                // absent, worker optional) or funded-timeout recovery (both funding fields
+                // present, worker required). Neither shape may contain submission/review data.
+                require!(
+                    self.review_deadline.is_none(),
+                    ErrorCode::InvalidStateTransition
+                );
+                require!(
+                    self.submission_reference.is_none(),
+                    ErrorCode::InvalidStateTransition
+                );
+                require!(
+                    self.funded_at.is_some() == self.submission_deadline.is_some(),
+                    ErrorCode::InvalidStateTransition
+                );
+                if self.funded_at.is_some() {
+                    require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn accept(&mut self, worker: Pubkey) -> Result<()> {
+        self.validate_invariants()?;
         require!(self.status.can_accept(), ErrorCode::InvalidStateTransition);
         require!(self.worker.is_none(), ErrorCode::InvalidStateTransition);
         require_keys_neq!(worker, self.creator, ErrorCode::Unauthorized);
@@ -121,10 +232,43 @@ impl Task {
         self.worker = Some(worker);
         self.status = TaskStatus::Accepted;
 
-        Ok(())
+        self.validate_invariants()
+    }
+
+    pub fn assign_worker(&mut self, selected_worker: Pubkey) -> Result<()> {
+        self.validate_invariants()?;
+        require!(
+            self.status == TaskStatus::Open,
+            ErrorCode::InvalidStateTransition
+        );
+        require!(self.worker.is_none(), ErrorCode::InvalidStateTransition);
+        require_keys_neq!(
+            selected_worker,
+            Pubkey::default(),
+            ErrorCode::InvalidSelectedWorker
+        );
+        require_keys_neq!(selected_worker, self.creator, ErrorCode::Unauthorized);
+
+        self.status = TaskStatus::Assigned;
+        self.validate_invariants()
+    }
+
+    pub fn accept_assignment(&mut self, worker: Pubkey) -> Result<()> {
+        self.validate_invariants()?;
+        require!(
+            self.status == TaskStatus::Assigned,
+            ErrorCode::InvalidStateTransition
+        );
+        require!(self.worker.is_none(), ErrorCode::InvalidStateTransition);
+        require_keys_neq!(worker, self.creator, ErrorCode::Unauthorized);
+
+        self.worker = Some(worker);
+        self.status = TaskStatus::Accepted;
+        self.validate_invariants()
     }
 
     pub fn fund(&mut self, timestamp: i64) -> Result<()> {
+        self.validate_invariants()?;
         require!(self.status.can_fund(), ErrorCode::InvalidStateTransition);
         require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
         require!(self.funded_at.is_none(), ErrorCode::InvalidStateTransition);
@@ -146,7 +290,7 @@ impl Task {
         self.funded_at = Some(timestamp);
         self.submission_deadline = Some(submission_deadline);
 
-        Ok(())
+        self.validate_invariants()
     }
 
     pub fn submit(
@@ -155,6 +299,7 @@ impl Task {
         submission_reference: String,
         timestamp: i64,
     ) -> Result<()> {
+        self.validate_invariants()?;
         require!(self.status.can_submit(), ErrorCode::InvalidStateTransition);
         let stored_worker = self.worker.ok_or(ErrorCode::InvalidStateTransition)?;
         require_keys_eq!(stored_worker, worker, ErrorCode::Unauthorized);
@@ -183,10 +328,11 @@ impl Task {
         self.review_deadline = Some(review_deadline);
         self.status = TaskStatus::Submitted;
 
-        Ok(())
+        self.validate_invariants()
     }
 
     pub fn pay(&mut self) -> Result<()> {
+        self.validate_invariants()?;
         require!(self.status.can_pay(), ErrorCode::InvalidStateTransition);
         require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
         require!(self.funded_at.is_some(), ErrorCode::InvalidStateTransition);
@@ -205,10 +351,11 @@ impl Task {
 
         self.status = TaskStatus::Paid;
 
-        Ok(())
+        self.validate_invariants()
     }
 
     pub fn refund_after_timeout(&mut self, timestamp: i64) -> Result<()> {
+        self.validate_invariants()?;
         require!(
             self.status == TaskStatus::Funded,
             ErrorCode::InvalidStateTransition
@@ -233,10 +380,11 @@ impl Task {
 
         self.status = TaskStatus::Cancelled;
 
-        Ok(())
+        self.validate_invariants()
     }
 
     pub fn pay_after_timeout(&mut self, timestamp: i64) -> Result<()> {
+        self.validate_invariants()?;
         require!(self.status.can_pay(), ErrorCode::InvalidStateTransition);
         let review_deadline = self
             .review_deadline
@@ -250,6 +398,7 @@ impl Task {
     }
 
     pub fn reject_submission(&mut self, timestamp: i64) -> Result<()> {
+        self.validate_invariants()?;
         require!(
             self.status == TaskStatus::Submitted,
             ErrorCode::InvalidStateTransition
@@ -266,10 +415,11 @@ impl Task {
 
         self.status = TaskStatus::Disputed;
 
-        Ok(())
+        self.validate_invariants()
     }
 
     pub fn resolve_dispute(&mut self, outcome: DisputeOutcome) -> Result<()> {
+        self.validate_invariants()?;
         require!(
             self.status == TaskStatus::Disputed,
             ErrorCode::InvalidStateTransition
@@ -286,23 +436,98 @@ impl Task {
             DisputeOutcome::RefundCreator => TaskStatus::Refunded,
         };
 
-        Ok(())
+        self.validate_invariants()
     }
 
     pub fn cancel(&mut self) -> Result<()> {
+        self.validate_invariants()?;
         require!(
-            matches!(self.status, TaskStatus::Open | TaskStatus::Accepted),
+            matches!(
+                self.status,
+                TaskStatus::Open | TaskStatus::Assigned | TaskStatus::Accepted
+            ),
             ErrorCode::InvalidStateTransition
         );
 
         self.status = TaskStatus::Cancelled;
 
+        self.validate_invariants()
+    }
+}
+
+impl WorkerAssignment {
+    pub fn validate_invariants(&self) -> Result<()> {
+        require_eq!(
+            self.version,
+            WORKER_ASSIGNMENT_VERSION,
+            ErrorCode::InvalidAssignmentVersion
+        );
+        require_keys_neq!(
+            self.task,
+            Pubkey::default(),
+            ErrorCode::InvalidAssignmentTask
+        );
+        require_keys_neq!(
+            self.selected_worker,
+            Pubkey::default(),
+            ErrorCode::InvalidSelectedWorker
+        );
+
+        // `accepted_at` is the state marker: None is pending and Some is accepted.
         Ok(())
+    }
+
+    pub fn accept(&mut self, worker: Pubkey, timestamp: i64) -> Result<()> {
+        self.validate_invariants()?;
+        require_keys_eq!(worker, self.selected_worker, ErrorCode::Unauthorized);
+        require!(
+            self.accepted_at.is_none(),
+            ErrorCode::InvalidAssignmentState
+        );
+        self.accepted_at = Some(timestamp);
+        self.validate_invariants()
     }
 }
 
 impl TaskResolution {
+    pub fn validate_invariants(&self) -> Result<()> {
+        require_eq!(
+            self.version,
+            TASK_RESOLUTION_VERSION,
+            ErrorCode::InvalidResolutionVersion
+        );
+        require_keys_neq!(
+            self.task,
+            Pubkey::default(),
+            ErrorCode::InvalidResolutionTask
+        );
+        require_keys_neq!(
+            self.arbitration_authority,
+            Pubkey::default(),
+            ErrorCode::InvalidArbitrationAuthority
+        );
+
+        match self.state {
+            ResolutionState::Ready => {
+                require!(self.outcome.is_none(), ErrorCode::InvalidResolutionState);
+            }
+            ResolutionState::Disputed => {
+                require!(self.opened_at.is_some(), ErrorCode::InvalidResolutionState);
+                require!(
+                    self.arbitration_deadline.is_some(),
+                    ErrorCode::InvalidResolutionState
+                );
+            }
+            ResolutionState::Resolved => {
+                require!(self.outcome.is_some(), ErrorCode::InvalidResolutionState);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn open_dispute(&mut self, timestamp: i64, rejection_reference: String) -> Result<()> {
+        self.validate_invariants()?;
         require!(
             self.state == ResolutionState::Ready,
             ErrorCode::InvalidResolutionState
@@ -328,10 +553,11 @@ impl TaskResolution {
         self.arbitration_deadline = Some(arbitration_deadline);
         self.rejection_reference = Some(rejection_reference);
 
-        Ok(())
+        self.validate_invariants()
     }
 
     pub fn resolve(&mut self, outcome: DisputeOutcome, timestamp: i64) -> Result<()> {
+        self.validate_invariants()?;
         self.require_disputed()?;
         let arbitration_deadline = self
             .arbitration_deadline
@@ -345,11 +571,13 @@ impl TaskResolution {
     }
 
     pub fn resolve_by_agreement(&mut self, outcome: DisputeOutcome) -> Result<()> {
+        self.validate_invariants()?;
         self.require_disputed()?;
         self.finish(outcome)
     }
 
     pub fn settle_after_timeout(&mut self, timestamp: i64) -> Result<()> {
+        self.validate_invariants()?;
         self.require_disputed()?;
         let arbitration_deadline = self
             .arbitration_deadline
@@ -379,7 +607,7 @@ impl TaskResolution {
     fn finish(&mut self, outcome: DisputeOutcome) -> Result<()> {
         self.state = ResolutionState::Resolved;
         self.outcome = Some(outcome);
-        Ok(())
+        self.validate_invariants()
     }
 }
 
@@ -428,6 +656,7 @@ mod tests {
             TaskStatus::Cancelled,
             TaskStatus::Disputed,
             TaskStatus::Refunded,
+            TaskStatus::Assigned,
         ] {
             assert!(!terminal_status.can_accept());
             assert!(!terminal_status.can_fund());
@@ -447,6 +676,7 @@ mod tests {
             (TaskStatus::Cancelled, 5),
             (TaskStatus::Disputed, 6),
             (TaskStatus::Refunded, 7),
+            (TaskStatus::Assigned, 8),
         ] {
             let mut bytes = Vec::new();
             status.serialize(&mut bytes).unwrap();
@@ -511,6 +741,7 @@ mod tests {
             TaskStatus::Cancelled,
             TaskStatus::Disputed,
             TaskStatus::Refunded,
+            TaskStatus::Assigned,
         ] {
             let mut task = task_with(status, None);
 
@@ -534,6 +765,69 @@ mod tests {
         );
         assert_eq!(task.worker, Some(existing_worker));
         assert!(task.status == TaskStatus::Open);
+    }
+
+    #[test]
+    fn creator_assignment_reserves_task_for_selected_worker() {
+        let selected_worker = Pubkey::new_unique();
+        let mut task = task_with(TaskStatus::Open, None);
+
+        task.assign_worker(selected_worker).unwrap();
+
+        assert!(task.status == TaskStatus::Assigned);
+        assert_eq!(task.worker, None);
+        assert_error(
+            task.accept(Pubkey::new_unique()),
+            ErrorCode::InvalidStateTransition,
+        );
+        assert!(task.status == TaskStatus::Assigned);
+    }
+
+    #[test]
+    fn selected_worker_can_accept_assignment() {
+        let selected_worker = Pubkey::new_unique();
+        let mut task = task_with(TaskStatus::Open, None);
+        task.assign_worker(selected_worker).unwrap();
+
+        task.accept_assignment(selected_worker).unwrap();
+
+        assert!(task.status == TaskStatus::Accepted);
+        assert_eq!(task.worker, Some(selected_worker));
+    }
+
+    #[test]
+    fn invalid_worker_selection_is_rejected() {
+        let mut task = task_with(TaskStatus::Open, None);
+        assert_error(
+            task.assign_worker(Pubkey::default()),
+            ErrorCode::InvalidSelectedWorker,
+        );
+        assert!(task.status == TaskStatus::Open);
+
+        let creator = task.creator;
+        assert_error(task.assign_worker(creator), ErrorCode::Unauthorized);
+        assert!(task.status == TaskStatus::Open);
+    }
+
+    #[test]
+    fn worker_assignment_enforces_selected_worker_and_replay_protection() {
+        let selected_worker = Pubkey::new_unique();
+        let mut assignment = ready_worker_assignment(selected_worker);
+
+        assert_error(
+            assignment.accept(Pubkey::new_unique(), 100),
+            ErrorCode::Unauthorized,
+        );
+        assert_eq!(assignment.accepted_at, None);
+
+        assignment.accept(selected_worker, 100).unwrap();
+        assert_eq!(assignment.accepted_at, Some(100));
+
+        assert_error(
+            assignment.accept(selected_worker, 200),
+            ErrorCode::InvalidAssignmentState,
+        );
+        assert_eq!(assignment.accepted_at, Some(100));
     }
 
     #[test]
@@ -563,6 +857,7 @@ mod tests {
             TaskStatus::Cancelled,
             TaskStatus::Disputed,
             TaskStatus::Refunded,
+            TaskStatus::Assigned,
         ] {
             let mut task = task_with(status, Some(Pubkey::new_unique()));
 
@@ -848,6 +1143,7 @@ mod tests {
             TaskStatus::Cancelled,
             TaskStatus::Disputed,
             TaskStatus::Refunded,
+            TaskStatus::Assigned,
         ] {
             let mut task = payable_task(worker);
             task.status = status;
@@ -978,6 +1274,7 @@ mod tests {
             TaskStatus::Cancelled,
             TaskStatus::Disputed,
             TaskStatus::Refunded,
+            TaskStatus::Assigned,
         ] {
             let mut task = payable_task(Pubkey::new_unique());
             task.status = status;
@@ -1130,6 +1427,12 @@ mod tests {
     }
 
     #[test]
+    fn assigned_task_can_be_cancelled() {
+        let mut task = task_with(TaskStatus::Assigned, None);
+        assert_cancellation_preserves_task_fields(&mut task);
+    }
+
+    #[test]
     fn funded_task_cannot_be_cancelled() {
         assert_cancellation_rejected(TaskStatus::Funded);
     }
@@ -1142,6 +1445,203 @@ mod tests {
     #[test]
     fn paid_task_cannot_be_cancelled() {
         assert_cancellation_rejected(TaskStatus::Paid);
+    }
+
+    #[test]
+    fn every_task_status_has_a_valid_invariant_fixture() {
+        for status in [
+            TaskStatus::Open,
+            TaskStatus::Assigned,
+            TaskStatus::Accepted,
+            TaskStatus::Funded,
+            TaskStatus::Submitted,
+            TaskStatus::Disputed,
+            TaskStatus::Paid,
+            TaskStatus::Refunded,
+            TaskStatus::Cancelled,
+        ] {
+            valid_task_for_status(status).validate_invariants().unwrap();
+        }
+
+        let mut accepted_cancellation = valid_task_for_status(TaskStatus::Cancelled);
+        accepted_cancellation.worker = Some(Pubkey::new_unique());
+        accepted_cancellation.validate_invariants().unwrap();
+
+        let mut timeout_cancellation = valid_task_for_status(TaskStatus::Cancelled);
+        timeout_cancellation.worker = Some(Pubkey::new_unique());
+        timeout_cancellation.funded_at = Some(10);
+        timeout_cancellation.submission_deadline = Some(20);
+        timeout_cancellation.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn every_task_invariant_rejects_an_invalid_fixture() {
+        for (status, mutate) in [
+            (
+                TaskStatus::Open,
+                (|task: &mut Task| task.worker = Some(Pubkey::new_unique())) as fn(&mut Task),
+            ),
+            (TaskStatus::Open, |task| task.funded_at = Some(1)),
+            (TaskStatus::Open, |task| task.submission_deadline = Some(1)),
+            (TaskStatus::Open, |task| task.review_deadline = Some(1)),
+            (TaskStatus::Open, |task| {
+                task.submission_reference = Some("submission".to_string())
+            }),
+            (TaskStatus::Assigned, |task| {
+                task.worker = Some(Pubkey::new_unique())
+            }),
+            (TaskStatus::Accepted, |task| task.worker = None),
+            (TaskStatus::Accepted, |task| task.funded_at = Some(1)),
+            (TaskStatus::Accepted, |task| {
+                task.submission_reference = Some("submission".to_string())
+            }),
+            (TaskStatus::Funded, |task| task.worker = None),
+            (TaskStatus::Funded, |task| task.funded_at = None),
+            (TaskStatus::Funded, |task| task.submission_deadline = None),
+            (TaskStatus::Funded, |task| task.review_deadline = Some(1)),
+            (TaskStatus::Funded, |task| {
+                task.submission_reference = Some("submission".to_string())
+            }),
+            (TaskStatus::Submitted, |task| task.worker = None),
+            (TaskStatus::Submitted, |task| task.funded_at = None),
+            (TaskStatus::Submitted, |task| {
+                task.submission_deadline = None
+            }),
+            (TaskStatus::Submitted, |task| task.review_deadline = None),
+            (TaskStatus::Submitted, |task| {
+                task.submission_reference = None
+            }),
+            (TaskStatus::Disputed, |task| task.worker = None),
+            (TaskStatus::Disputed, |task| task.funded_at = None),
+            (TaskStatus::Disputed, |task| task.submission_deadline = None),
+            (TaskStatus::Disputed, |task| task.review_deadline = None),
+            (TaskStatus::Disputed, |task| {
+                task.submission_reference = None
+            }),
+            (TaskStatus::Paid, |task| task.worker = None),
+            (TaskStatus::Paid, |task| task.submission_reference = None),
+            (TaskStatus::Refunded, |task| task.worker = None),
+            (TaskStatus::Cancelled, |task| task.review_deadline = Some(1)),
+            (TaskStatus::Cancelled, |task| {
+                task.submission_reference = Some("submission".to_string())
+            }),
+            (TaskStatus::Cancelled, |task| task.funded_at = Some(1)),
+            (TaskStatus::Cancelled, |task| {
+                task.submission_deadline = Some(1)
+            }),
+            (TaskStatus::Cancelled, |task| {
+                task.worker = None;
+                task.funded_at = Some(1);
+                task.submission_deadline = Some(2);
+            }),
+        ] {
+            let mut task = valid_task_for_status(status);
+            mutate(&mut task);
+            assert_error(
+                task.validate_invariants(),
+                ErrorCode::InvalidStateTransition,
+            );
+        }
+    }
+
+    #[test]
+    fn every_resolution_state_has_a_valid_invariant_fixture() {
+        for state in [
+            ResolutionState::Ready,
+            ResolutionState::Disputed,
+            ResolutionState::Resolved,
+        ] {
+            valid_resolution_for_state(state)
+                .validate_invariants()
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn every_resolution_invariant_rejects_an_invalid_fixture() {
+        let mut resolution = valid_resolution_for_state(ResolutionState::Ready);
+        resolution.version = TASK_RESOLUTION_VERSION.checked_add(1).unwrap();
+        assert_error(
+            resolution.validate_invariants(),
+            ErrorCode::InvalidResolutionVersion,
+        );
+
+        let mut resolution = valid_resolution_for_state(ResolutionState::Ready);
+        resolution.task = Pubkey::default();
+        assert_error(
+            resolution.validate_invariants(),
+            ErrorCode::InvalidResolutionTask,
+        );
+
+        let mut resolution = valid_resolution_for_state(ResolutionState::Ready);
+        resolution.arbitration_authority = Pubkey::default();
+        assert_error(
+            resolution.validate_invariants(),
+            ErrorCode::InvalidArbitrationAuthority,
+        );
+
+        let mut resolution = valid_resolution_for_state(ResolutionState::Ready);
+        resolution.outcome = Some(DisputeOutcome::PayWorker);
+        assert_error(
+            resolution.validate_invariants(),
+            ErrorCode::InvalidResolutionState,
+        );
+
+        let mut resolution = valid_resolution_for_state(ResolutionState::Disputed);
+        resolution.opened_at = None;
+        assert_error(
+            resolution.validate_invariants(),
+            ErrorCode::InvalidResolutionState,
+        );
+
+        let mut resolution = valid_resolution_for_state(ResolutionState::Disputed);
+        resolution.arbitration_deadline = None;
+        assert_error(
+            resolution.validate_invariants(),
+            ErrorCode::InvalidResolutionState,
+        );
+
+        let mut resolution = valid_resolution_for_state(ResolutionState::Resolved);
+        resolution.outcome = None;
+        assert_error(
+            resolution.validate_invariants(),
+            ErrorCode::InvalidResolutionState,
+        );
+    }
+
+    #[test]
+    fn assignment_invariants_cover_pending_accepted_and_invalid_states() {
+        let selected_worker = Pubkey::new_unique();
+        let mut pending = ready_worker_assignment(selected_worker);
+        pending.validate_invariants().unwrap();
+
+        pending.accept(selected_worker, 100).unwrap();
+        pending.validate_invariants().unwrap();
+        assert_error(
+            pending.accept(selected_worker, 101),
+            ErrorCode::InvalidAssignmentState,
+        );
+
+        let mut invalid = ready_worker_assignment(selected_worker);
+        invalid.version = WORKER_ASSIGNMENT_VERSION.checked_add(1).unwrap();
+        assert_error(
+            invalid.validate_invariants(),
+            ErrorCode::InvalidAssignmentVersion,
+        );
+
+        let mut invalid = ready_worker_assignment(selected_worker);
+        invalid.task = Pubkey::default();
+        assert_error(
+            invalid.validate_invariants(),
+            ErrorCode::InvalidAssignmentTask,
+        );
+
+        let mut invalid = ready_worker_assignment(selected_worker);
+        invalid.selected_worker = Pubkey::default();
+        assert_error(
+            invalid.validate_invariants(),
+            ErrorCode::InvalidSelectedWorker,
+        );
     }
 
     #[test]
@@ -1186,6 +1686,61 @@ mod tests {
         task
     }
 
+    fn valid_task_for_status(status: TaskStatus) -> Task {
+        let worker = Pubkey::new_unique();
+        let mut task = task_with(TaskStatus::Open, None);
+        task.status = status;
+        match status {
+            TaskStatus::Open | TaskStatus::Assigned | TaskStatus::Cancelled => {}
+            TaskStatus::Accepted => task.worker = Some(worker),
+            TaskStatus::Funded => {
+                task.worker = Some(worker);
+                task.funded_at = Some(10);
+                task.submission_deadline = Some(20);
+            }
+            TaskStatus::Submitted | TaskStatus::Disputed | TaskStatus::Paid => {
+                task.worker = Some(worker);
+                task.funded_at = Some(10);
+                task.submission_deadline = Some(20);
+                task.review_deadline = Some(30);
+                task.submission_reference = Some("submission".to_string());
+            }
+            TaskStatus::Refunded => task.worker = Some(worker),
+        }
+        task
+    }
+
+    fn valid_resolution_for_state(state: ResolutionState) -> TaskResolution {
+        let mut resolution = TaskResolution {
+            version: TASK_RESOLUTION_VERSION,
+            bump: 255,
+            task: Pubkey::new_unique(),
+            arbitration_authority: Pubkey::new_unique(),
+            arbitration_fee_lamports: 0,
+            state,
+            opened_at: None,
+            arbitration_deadline: None,
+            rejection_reference: None,
+            outcome: None,
+            reserved: [0; 64],
+        };
+        match state {
+            ResolutionState::Ready => {}
+            ResolutionState::Disputed => {
+                resolution.opened_at = Some(10);
+                resolution.arbitration_deadline = Some(20);
+                resolution.rejection_reference = Some("rejection".to_string());
+            }
+            ResolutionState::Resolved => {
+                resolution.opened_at = Some(10);
+                resolution.arbitration_deadline = Some(20);
+                resolution.rejection_reference = Some("rejection".to_string());
+                resolution.outcome = Some(DisputeOutcome::PayWorker);
+            }
+        }
+        resolution
+    }
+
     fn funded_task(worker: Pubkey, funded_at: i64) -> Task {
         let mut task = task_with(TaskStatus::Accepted, Some(worker));
         task.fund(funded_at).unwrap();
@@ -1214,5 +1769,17 @@ mod tests {
             .open_dispute(timestamp, "ipfs://rejection".to_string())
             .unwrap();
         resolution
+    }
+
+    fn ready_worker_assignment(selected_worker: Pubkey) -> WorkerAssignment {
+        WorkerAssignment {
+            version: 1,
+            bump: 255,
+            task: Pubkey::new_unique(),
+            selected_worker,
+            assigned_at: 99,
+            accepted_at: None,
+            reserved: [0; 64],
+        }
     }
 }
