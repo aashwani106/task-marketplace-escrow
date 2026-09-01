@@ -15,6 +15,10 @@ declare_id!("FM6bo4u3EMLxMM5NRappPN3ftNzKd7DV5A3z6XFsBQ87");
 pub mod task_marketplace {
     use super::*;
 
+    pub fn accept_task(ctx: Context<AcceptTask>) -> Result<()> {
+        crate::instructions::accept_task::handle_accept_task(ctx)
+    }
+
     pub fn create_creator_profile(ctx: Context<CreateCreatorProfile>) -> Result<()> {
         crate::instructions::create_creator_profile::handle_create_creator_profile(ctx)
     }
