@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="700" viewBox="0 0 1400 700" role="img" aria-labelledby="title desc">
+  <title id="title">Task Marketplace lifecycle</title>
+  <desc id="desc">Complete valid TaskStatus transitions including assignment, cancellation, timeouts, disputes, payment, and refund.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0 0 L12 6 L0 12 Z" fill="#f8fafc"/></marker>
+    <style>
+      .bg{fill:#0b0f14}.txt{fill:#f8fafc;font-family:'Comic Sans MS','Bradley Hand',sans-serif}.title{font-size:38px;font-weight:700}.label{font-size:15px}.state{stroke-width:3}.name{font-size:22px;font-weight:700}.flow{fill:none;stroke:#f8fafc;stroke-width:3;marker-end:url(#arrow)}.timeout{fill:none;stroke:#22d3ee;stroke-width:3;stroke-dasharray:8 7;marker-end:url(#arrow)}.cancel{fill:none;stroke:#fb7185;stroke-width:2.5;stroke-dasharray:7 7;marker-end:url(#arrow)}.green{fill:#14251a;stroke:#84cc16}.amber{fill:#29210f;stroke:#fbbf24}.blue{fill:#10213a;stroke:#60a5fa}.cyan{fill:#0d2630;stroke:#22d3ee}.violet{fill:#21152b;stroke:#c084fc}.coral{fill:#2c1717;stroke:#fb7185}.terminal{stroke-width:5}
+    </style>
+  </defs>
+  <rect class="bg" width="1400" height="700"/>
+  <text class="txt title" x="700" y="55" text-anchor="middle">TASK LIFECYCLE</text>
+  <text class="txt label" x="700" y="84" text-anchor="middle" fill="#94a3b8">Solid: normal action · cyan dashed: timeout · coral dashed: cancellation</text>
+
+  <g class="txt" text-anchor="middle">
+    <rect class="state green" x="60" y="180" width="150" height="72" rx="18"/><text class="name" x="135" y="225">Open</text>
+    <rect class="state amber" x="285" y="110" width="165" height="72" rx="18"/><text class="name" x="367" y="155">Assigned</text>
+    <rect class="state blue" x="285" y="270" width="165" height="72" rx="18"/><text class="name" x="367" y="315">Accepted</text>
+    <rect class="state green" x="535" y="270" width="155" height="72" rx="18"/><text class="name" x="612" y="315">Funded</text>
+    <rect class="state cyan" x="790" y="270" width="175" height="72" rx="18"/><text class="name" x="877" y="315">Submitted</text>
+    <rect class="state violet" x="1035" y="180" width="165" height="72" rx="18"/><text class="name" x="1117" y="225">Disputed</text>
+    <rect class="state green terminal" x="1230" y="80" width="130" height="72" rx="18"/><text class="name" x="1295" y="125">Paid</text>
+    <rect class="state amber terminal" x="1230" y="300" width="130" height="72" rx="18"/><text class="name" x="1295" y="345">Refunded</text>
+    <rect class="state coral terminal" x="555" y="530" width="175" height="72" rx="18"/><text class="name" x="642" y="575">Cancelled</text>
+  </g>
+
+  <path class="flow" d="M202 190 C230 160 250 146 284 146"/><text class="txt label" x="240" y="142">assign_worker</text>
+  <path class="flow" d="M367 182 L367 269"/><text class="txt label" x="380" y="230">accept_assignment</text>
+  <path class="flow" d="M210 226 C245 250 255 306 284 306"/><text class="txt label" x="230" y="286">accept_task</text>
+  <path class="flow" d="M450 306 L534 306"/><text class="txt label" x="492" y="288" text-anchor="middle">fund_task</text>
+  <path class="flow" d="M690 306 L789 306"/><text class="txt label" x="740" y="288" text-anchor="middle">submit_task</text>
+  <path class="flow" d="M965 284 C995 260 1005 216 1034 216"/><text class="txt label" x="1002" y="252">reject_submission</text>
+  <path class="flow" d="M1200 194 C1218 165 1220 124 1229 116"/><text class="txt label" x="1190" y="144" text-anchor="end">PayWorker</text>
+  <path class="flow" d="M1200 238 C1215 270 1220 324 1229 336"/><text class="txt label" x="1194" y="290" text-anchor="end">RefundCreator</text>
+  <path class="flow" d="M965 300 C1070 280 1160 160 1229 128"/><text class="txt label" x="1085" y="226">pay_task</text>
+  <path class="timeout" d="M965 325 C1080 360 1180 200 1231 143"/><text class="txt label" x="1115" y="350" fill="#22d3ee">review timeout</text>
+
+  <path class="cancel" d="M135 252 C140 470 510 545 554 560"/><text class="txt label" x="205" y="455" fill="#fb7185">cancel_task</text>
+  <path class="cancel" d="M367 342 C380 470 525 530 568 546"/><text class="txt label" x="410" y="440" fill="#fb7185">cancel_task</text>
+  <path class="cancel" d="M612 342 L642 529"/><text class="txt label" x="655" y="430" fill="#fb7185">refund_task_after_timeout</text>
+  <path class="cancel" d="M367 182 C440 205 510 490 594 530"/><text class="txt label" x="465" y="388" fill="#fb7185">cancel_task</text>
+
+  <text class="txt label" x="1117" y="420" text-anchor="middle" fill="#94a3b8">Dispute exits: arbitrator · mutual agreement · timeout</text>
+  <text class="txt label" x="700" y="656" text-anchor="middle" fill="#94a3b8">Paid, Refunded, and Cancelled are terminal</text>
+</svg>
