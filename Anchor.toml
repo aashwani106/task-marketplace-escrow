@@ -10,7 +10,7 @@ skip-lint = false
 task_marketplace = "FM6bo4u3EMLxMM5NRappPN3ftNzKd7DV5A3z6XFsBQ87"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

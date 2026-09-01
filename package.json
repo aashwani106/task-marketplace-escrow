@@ -1,0 +1,21 @@
+{
+  "name": "task-marketplace-tools",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.18.0"
+  },
+  "scripts": {
+    "smoke:devnet": "tsx scripts/devnet-smoke-test.ts"
+  },
+  "dependencies": {
+    "@anchor-lang/core": "1.1.2",
+    "@solana/web3.js": "1.98.4",
+    "bn.js": "5.2.5"
+  },
+  "devDependencies": {
+    "@types/bn.js": "5.2.0",
+    "@types/node": "22.18.0",
+    "tsx": "4.20.5"
+  }
+}
