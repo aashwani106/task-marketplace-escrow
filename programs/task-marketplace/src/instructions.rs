@@ -1,7 +1,20 @@
 pub mod accept_task;
+pub mod cancel_task;
 pub mod create_creator_profile;
 pub mod create_task;
+mod escrow;
+pub mod fund_task;
+pub mod pay_task;
+pub mod refund_task_after_timeout;
+pub mod settle_task_after_timeout;
+pub mod submit_task;
 
 pub use accept_task::*;
+pub use cancel_task::*;
 pub use create_creator_profile::*;
 pub use create_task::*;
+pub use fund_task::*;
+pub use pay_task::*;
+pub use refund_task_after_timeout::*;
+pub use settle_task_after_timeout::*;
+pub use submit_task::*;

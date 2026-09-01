@@ -19,6 +19,10 @@ pub mod task_marketplace {
         crate::instructions::accept_task::handle_accept_task(ctx)
     }
 
+    pub fn cancel_task(ctx: Context<CancelTask>) -> Result<()> {
+        crate::instructions::cancel_task::handle_cancel_task(ctx)
+    }
+
     pub fn create_creator_profile(ctx: Context<CreateCreatorProfile>) -> Result<()> {
         crate::instructions::create_creator_profile::handle_create_creator_profile(ctx)
     }
@@ -37,5 +41,25 @@ pub mod task_marketplace {
             description,
             reward_amount,
         )
+    }
+
+    pub fn fund_task(ctx: Context<FundTask>) -> Result<()> {
+        crate::instructions::fund_task::handle_fund_task(ctx)
+    }
+
+    pub fn pay_task(ctx: Context<PayTask>) -> Result<()> {
+        crate::instructions::pay_task::handle_pay_task(ctx)
+    }
+
+    pub fn refund_task_after_timeout(ctx: Context<RefundTaskAfterTimeout>) -> Result<()> {
+        crate::instructions::refund_task_after_timeout::handle_refund_task_after_timeout(ctx)
+    }
+
+    pub fn settle_task_after_timeout(ctx: Context<SettleTaskAfterTimeout>) -> Result<()> {
+        crate::instructions::settle_task_after_timeout::handle_settle_task_after_timeout(ctx)
+    }
+
+    pub fn submit_task(ctx: Context<SubmitTask>, submission_reference: String) -> Result<()> {
+        crate::instructions::submit_task::handle_submit_task(ctx, submission_reference)
     }
 }

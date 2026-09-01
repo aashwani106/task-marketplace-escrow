@@ -1,12 +1,27 @@
 use anchor_lang::prelude::*;
 
-use crate::error::ErrorCode;
+use crate::{
+    constants::{
+        MAX_SUBMISSION_REFERENCE_LENGTH, REVIEW_TIMEOUT_SECONDS, SUBMISSION_TIMEOUT_SECONDS,
+    },
+    error::ErrorCode,
+};
 
 #[account]
 #[derive(InitSpace)]
 pub struct CreatorProfile {
     pub task_count: u64,
     pub creator: Pubkey,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct EscrowVault {
+    pub version: u8,
+    pub bump: u8,
+    pub task: Pubkey,
+    pub escrowed_lamports: u64,
+    pub reserved: [u8; 64],
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
@@ -59,6 +74,9 @@ pub struct Task {
     pub submission_reference: Option<String>,
 
     pub funded_at: Option<i64>,
+
+    pub submission_deadline: Option<i64>,
+    pub review_deadline: Option<i64>,
 }
 
 impl Task {
@@ -69,6 +87,142 @@ impl Task {
 
         self.worker = Some(worker);
         self.status = TaskStatus::Accepted;
+
+        Ok(())
+    }
+
+    pub fn fund(&mut self, timestamp: i64) -> Result<()> {
+        require!(self.status.can_fund(), ErrorCode::InvalidStateTransition);
+        require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+        require!(self.funded_at.is_none(), ErrorCode::InvalidStateTransition);
+        require!(self.reward_amount > 0, ErrorCode::InvalidReward);
+        require!(
+            self.submission_deadline.is_none(),
+            ErrorCode::InvalidStateTransition
+        );
+        require!(
+            self.review_deadline.is_none(),
+            ErrorCode::InvalidStateTransition
+        );
+
+        let submission_deadline = timestamp
+            .checked_add(SUBMISSION_TIMEOUT_SECONDS)
+            .ok_or(ErrorCode::DeadlineOverflow)?;
+
+        self.status = TaskStatus::Funded;
+        self.funded_at = Some(timestamp);
+        self.submission_deadline = Some(submission_deadline);
+
+        Ok(())
+    }
+
+    pub fn submit(
+        &mut self,
+        worker: Pubkey,
+        submission_reference: String,
+        timestamp: i64,
+    ) -> Result<()> {
+        require!(self.status.can_submit(), ErrorCode::InvalidStateTransition);
+        let stored_worker = self.worker.ok_or(ErrorCode::InvalidStateTransition)?;
+        require_keys_eq!(stored_worker, worker, ErrorCode::Unauthorized);
+        let submission_deadline = self
+            .submission_deadline
+            .ok_or(ErrorCode::InvalidStateTransition)?;
+        require!(
+            timestamp < submission_deadline,
+            ErrorCode::SubmissionWindowExpired
+        );
+        require!(
+            self.review_deadline.is_none(),
+            ErrorCode::InvalidStateTransition
+        );
+        require!(
+            !submission_reference.trim().is_empty()
+                && submission_reference.len() <= MAX_SUBMISSION_REFERENCE_LENGTH,
+            ErrorCode::InvalidSubmissionReference
+        );
+
+        let review_deadline = timestamp
+            .checked_add(REVIEW_TIMEOUT_SECONDS)
+            .ok_or(ErrorCode::DeadlineOverflow)?;
+
+        self.submission_reference = Some(submission_reference);
+        self.review_deadline = Some(review_deadline);
+        self.status = TaskStatus::Submitted;
+
+        Ok(())
+    }
+
+    pub fn pay(&mut self) -> Result<()> {
+        require!(self.status.can_pay(), ErrorCode::InvalidStateTransition);
+        require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+        require!(self.funded_at.is_some(), ErrorCode::InvalidStateTransition);
+        require!(
+            self.submission_deadline.is_some(),
+            ErrorCode::InvalidStateTransition
+        );
+        require!(
+            self.review_deadline.is_some(),
+            ErrorCode::InvalidStateTransition
+        );
+        require!(
+            self.submission_reference.is_some(),
+            ErrorCode::InvalidStateTransition
+        );
+
+        self.status = TaskStatus::Paid;
+
+        Ok(())
+    }
+
+    pub fn refund_after_timeout(&mut self, timestamp: i64) -> Result<()> {
+        require!(
+            self.status == TaskStatus::Funded,
+            ErrorCode::InvalidStateTransition
+        );
+        require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+        require!(self.funded_at.is_some(), ErrorCode::InvalidStateTransition);
+        require!(
+            self.submission_reference.is_none(),
+            ErrorCode::InvalidStateTransition
+        );
+        require!(
+            self.review_deadline.is_none(),
+            ErrorCode::InvalidStateTransition
+        );
+        let submission_deadline = self
+            .submission_deadline
+            .ok_or(ErrorCode::InvalidStateTransition)?;
+        require!(
+            timestamp >= submission_deadline,
+            ErrorCode::SubmissionDeadlineNotReached
+        );
+
+        self.status = TaskStatus::Cancelled;
+
+        Ok(())
+    }
+
+    pub fn pay_after_timeout(&mut self, timestamp: i64) -> Result<()> {
+        require!(self.status.can_pay(), ErrorCode::InvalidStateTransition);
+        let review_deadline = self
+            .review_deadline
+            .ok_or(ErrorCode::InvalidStateTransition)?;
+        require!(
+            timestamp >= review_deadline,
+            ErrorCode::ReviewDeadlineNotReached
+        );
+
+        self.pay()
+    }
+
+    pub fn cancel(&mut self) -> Result<()> {
+        require!(
+            matches!(self.status, TaskStatus::Open | TaskStatus::Accepted),
+            ErrorCode::InvalidStateTransition
+        );
+
+        self.status = TaskStatus::Cancelled;
 
         Ok(())
     }
@@ -89,6 +243,8 @@ mod tests {
             status,
             submission_reference: None,
             funded_at: None,
+            submission_deadline: None,
+            review_deadline: None,
         }
     }
 
@@ -198,5 +354,480 @@ mod tests {
         );
         assert_eq!(task.worker, Some(existing_worker));
         assert!(task.status == TaskStatus::Open);
+    }
+
+    #[test]
+    fn accepted_task_with_worker_can_be_funded() {
+        let worker = Pubkey::new_unique();
+        let mut task = task_with(TaskStatus::Accepted, Some(worker));
+
+        task.fund(1_234_567).unwrap();
+
+        assert!(task.status == TaskStatus::Funded);
+        assert_eq!(task.funded_at, Some(1_234_567));
+        assert_eq!(
+            task.submission_deadline,
+            Some(1_234_567 + SUBMISSION_TIMEOUT_SECONDS)
+        );
+        assert_eq!(task.review_deadline, None);
+        assert_eq!(task.worker, Some(worker));
+    }
+
+    #[test]
+    fn non_accepted_states_cannot_be_funded() {
+        for status in [
+            TaskStatus::Open,
+            TaskStatus::Funded,
+            TaskStatus::Submitted,
+            TaskStatus::Paid,
+            TaskStatus::Cancelled,
+        ] {
+            let mut task = task_with(status, Some(Pubkey::new_unique()));
+
+            assert_error(task.fund(100), ErrorCode::InvalidStateTransition);
+            assert!(task.status == status);
+            assert_eq!(task.funded_at, None);
+        }
+    }
+
+    #[test]
+    fn accepted_task_without_worker_cannot_be_funded() {
+        let mut task = task_with(TaskStatus::Accepted, None);
+
+        assert_error(task.fund(100), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Accepted);
+        assert_eq!(task.funded_at, None);
+    }
+
+    #[test]
+    fn task_with_existing_funding_timestamp_cannot_be_funded() {
+        let original_timestamp = 50;
+        let mut task = task_with(TaskStatus::Accepted, Some(Pubkey::new_unique()));
+        task.funded_at = Some(original_timestamp);
+
+        assert_error(task.fund(100), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Accepted);
+        assert_eq!(task.funded_at, Some(original_timestamp));
+    }
+
+    #[test]
+    fn task_with_zero_reward_cannot_be_funded() {
+        let mut task = task_with(TaskStatus::Accepted, Some(Pubkey::new_unique()));
+        task.reward_amount = 0;
+
+        assert_error(task.fund(100), ErrorCode::InvalidReward);
+        assert!(task.status == TaskStatus::Accepted);
+        assert_eq!(task.funded_at, None);
+    }
+
+    #[test]
+    fn funded_task_rejects_replay_and_preserves_original_timestamp() {
+        let original_timestamp = 100;
+        let mut task = task_with(TaskStatus::Accepted, Some(Pubkey::new_unique()));
+        task.fund(original_timestamp).unwrap();
+
+        assert_error(task.fund(200), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Funded);
+        assert_eq!(task.funded_at, Some(original_timestamp));
+    }
+
+    #[test]
+    fn funded_task_can_be_submitted_by_worker() {
+        let worker = Pubkey::new_unique();
+        let funded_at = 100;
+        let mut task = funded_task(worker, funded_at);
+
+        task.submit(worker, "ipfs://submission".to_string(), funded_at + 1)
+            .unwrap();
+
+        assert!(task.status == TaskStatus::Submitted);
+        assert_eq!(
+            task.submission_reference,
+            Some("ipfs://submission".to_string())
+        );
+        assert_eq!(task.funded_at, Some(funded_at));
+        assert_eq!(task.worker, Some(worker));
+        assert_eq!(
+            task.review_deadline,
+            Some(funded_at + 1 + REVIEW_TIMEOUT_SECONDS)
+        );
+    }
+
+    #[test]
+    fn wrong_worker_cannot_submit_task() {
+        let worker = Pubkey::new_unique();
+        let mut task = funded_task(worker, 100);
+
+        assert_error(
+            task.submit(Pubkey::new_unique(), "ipfs://submission".to_string(), 101),
+            ErrorCode::Unauthorized,
+        );
+        assert!(task.status == TaskStatus::Funded);
+        assert_eq!(task.worker, Some(worker));
+        assert_eq!(task.submission_reference, None);
+    }
+
+    #[test]
+    fn creator_cannot_submit_task() {
+        let worker = Pubkey::new_unique();
+        let mut task = funded_task(worker, 100);
+        let creator = task.creator;
+
+        assert_error(
+            task.submit(creator, "ipfs://submission".to_string(), 101),
+            ErrorCode::Unauthorized,
+        );
+        assert!(task.status == TaskStatus::Funded);
+        assert_eq!(task.worker, Some(worker));
+        assert_eq!(task.submission_reference, None);
+    }
+
+    #[test]
+    fn submitted_task_rejects_replay() {
+        let worker = Pubkey::new_unique();
+        let original_reference = "ipfs://original".to_string();
+        let mut task = funded_task(worker, 100);
+        task.submit(worker, original_reference.clone(), 101)
+            .unwrap();
+
+        assert_error(
+            task.submit(worker, "ipfs://replacement".to_string(), 102),
+            ErrorCode::InvalidStateTransition,
+        );
+        assert!(task.status == TaskStatus::Submitted);
+        assert_eq!(task.submission_reference, Some(original_reference));
+    }
+
+    #[test]
+    fn empty_submission_reference_is_rejected() {
+        let worker = Pubkey::new_unique();
+
+        for submission_reference in ["", "   "] {
+            let mut task = funded_task(worker, 100);
+
+            assert_error(
+                task.submit(worker, submission_reference.to_string(), 101),
+                ErrorCode::InvalidSubmissionReference,
+            );
+            assert!(task.status == TaskStatus::Funded);
+            assert_eq!(task.submission_reference, None);
+        }
+    }
+
+    #[test]
+    fn oversized_submission_reference_is_rejected() {
+        let worker = Pubkey::new_unique();
+        let mut task = funded_task(worker, 100);
+
+        assert_error(
+            task.submit(worker, "s".repeat(201), 101),
+            ErrorCode::InvalidSubmissionReference,
+        );
+        assert!(task.status == TaskStatus::Funded);
+        assert_eq!(task.submission_reference, None);
+    }
+
+    #[test]
+    fn two_hundred_byte_submission_reference_is_accepted() {
+        let worker = Pubkey::new_unique();
+        let reference = "s".repeat(200);
+        let mut task = funded_task(worker, 100);
+
+        task.submit(worker, reference.clone(), 101).unwrap();
+
+        assert!(task.status == TaskStatus::Submitted);
+        assert_eq!(task.submission_reference, Some(reference));
+    }
+
+    #[test]
+    fn funding_deadline_overflow_is_rejected_without_mutation() {
+        let worker = Pubkey::new_unique();
+        let mut task = task_with(TaskStatus::Accepted, Some(worker));
+
+        assert_error(task.fund(i64::MAX), ErrorCode::DeadlineOverflow);
+        assert!(task.status == TaskStatus::Accepted);
+        assert_eq!(task.funded_at, None);
+        assert_eq!(task.submission_deadline, None);
+    }
+
+    #[test]
+    fn submission_at_deadline_is_rejected_without_mutation() {
+        let worker = Pubkey::new_unique();
+        let mut task = funded_task(worker, 100);
+        let deadline = task.submission_deadline.unwrap();
+
+        assert_error(
+            task.submit(worker, "ipfs://submission".to_string(), deadline),
+            ErrorCode::SubmissionWindowExpired,
+        );
+        assert!(task.status == TaskStatus::Funded);
+        assert_eq!(task.submission_reference, None);
+        assert_eq!(task.review_deadline, None);
+    }
+
+    #[test]
+    fn review_deadline_overflow_is_rejected_without_mutation() {
+        let worker = Pubkey::new_unique();
+        let mut task = funded_task(worker, 100);
+        task.submission_deadline = Some(i64::MAX);
+
+        assert_error(
+            task.submit(worker, "ipfs://submission".to_string(), i64::MAX - 1),
+            ErrorCode::DeadlineOverflow,
+        );
+        assert!(task.status == TaskStatus::Funded);
+        assert_eq!(task.submission_reference, None);
+        assert_eq!(task.review_deadline, None);
+    }
+
+    #[test]
+    fn creator_refund_requires_submission_deadline() {
+        let worker = Pubkey::new_unique();
+        let mut task = funded_task(worker, 100);
+        let deadline = task.submission_deadline.unwrap();
+
+        assert_error(
+            task.refund_after_timeout(deadline - 1),
+            ErrorCode::SubmissionDeadlineNotReached,
+        );
+        assert!(task.status == TaskStatus::Funded);
+
+        task.refund_after_timeout(deadline).unwrap();
+        assert!(task.status == TaskStatus::Cancelled);
+        assert_eq!(task.worker, Some(worker));
+        assert_eq!(task.funded_at, Some(100));
+        assert_eq!(task.submission_reference, None);
+        assert_eq!(task.submission_deadline, Some(deadline));
+        assert_eq!(task.review_deadline, None);
+    }
+
+    #[test]
+    fn submitted_task_cannot_use_timeout_refund() {
+        let worker = Pubkey::new_unique();
+        let mut task = payable_task(worker);
+        let deadline = task.submission_deadline.unwrap();
+
+        assert_error(
+            task.refund_after_timeout(deadline),
+            ErrorCode::InvalidStateTransition,
+        );
+        assert!(task.status == TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn permissionless_payment_requires_review_deadline() {
+        let worker = Pubkey::new_unique();
+        let mut task = payable_task(worker);
+        let deadline = task.review_deadline.unwrap();
+
+        assert_error(
+            task.pay_after_timeout(deadline - 1),
+            ErrorCode::ReviewDeadlineNotReached,
+        );
+        assert!(task.status == TaskStatus::Submitted);
+
+        task.pay_after_timeout(deadline).unwrap();
+        assert!(task.status == TaskStatus::Paid);
+    }
+
+    #[test]
+    fn timeout_payment_replay_is_rejected() {
+        let worker = Pubkey::new_unique();
+        let mut task = payable_task(worker);
+        let deadline = task.review_deadline.unwrap();
+        task.pay_after_timeout(deadline).unwrap();
+
+        assert_error(
+            task.pay_after_timeout(deadline),
+            ErrorCode::InvalidStateTransition,
+        );
+        assert!(task.status == TaskStatus::Paid);
+    }
+
+    #[test]
+    fn submitted_task_can_be_paid() {
+        let worker = Pubkey::new_unique();
+        let mut task = payable_task(worker);
+
+        task.pay().unwrap();
+
+        assert!(task.status == TaskStatus::Paid);
+    }
+
+    #[test]
+    fn non_submitted_states_cannot_be_paid() {
+        let worker = Pubkey::new_unique();
+
+        for status in [
+            TaskStatus::Open,
+            TaskStatus::Accepted,
+            TaskStatus::Funded,
+            TaskStatus::Paid,
+            TaskStatus::Cancelled,
+        ] {
+            let mut task = payable_task(worker);
+            task.status = status;
+
+            assert_error(task.pay(), ErrorCode::InvalidStateTransition);
+            assert!(task.status == status);
+        }
+    }
+
+    #[test]
+    fn submitted_task_without_worker_cannot_be_paid() {
+        let mut task = payable_task(Pubkey::new_unique());
+        task.worker = None;
+
+        assert_error(task.pay(), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn submitted_task_without_funding_timestamp_cannot_be_paid() {
+        let mut task = payable_task(Pubkey::new_unique());
+        task.funded_at = None;
+
+        assert_error(task.pay(), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn submitted_task_without_submission_reference_cannot_be_paid() {
+        let mut task = payable_task(Pubkey::new_unique());
+        task.submission_reference = None;
+
+        assert_error(task.pay(), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn submitted_task_without_submission_deadline_cannot_be_paid() {
+        let mut task = payable_task(Pubkey::new_unique());
+        task.submission_deadline = None;
+
+        assert_error(task.pay(), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn submitted_task_without_review_deadline_cannot_be_paid() {
+        let mut task = payable_task(Pubkey::new_unique());
+        task.review_deadline = None;
+
+        assert_error(task.pay(), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn paid_task_rejects_replay() {
+        let mut task = payable_task(Pubkey::new_unique());
+        task.pay().unwrap();
+
+        assert_error(task.pay(), ErrorCode::InvalidStateTransition);
+        assert!(task.status == TaskStatus::Paid);
+    }
+
+    #[test]
+    fn payment_changes_only_task_status() {
+        let worker = Pubkey::new_unique();
+        let mut task = payable_task(worker);
+        let task_number = task.task_number;
+        let creator = task.creator;
+        let title = task.title.clone();
+        let description = task.description.clone();
+        let reward_amount = task.reward_amount;
+        let submission_reference = task.submission_reference.clone();
+        let funded_at = task.funded_at;
+        let submission_deadline = task.submission_deadline;
+        let review_deadline = task.review_deadline;
+
+        task.pay().unwrap();
+
+        assert!(task.status == TaskStatus::Paid);
+        assert_eq!(task.task_number, task_number);
+        assert_eq!(task.creator, creator);
+        assert_eq!(task.worker, Some(worker));
+        assert_eq!(task.title, title);
+        assert_eq!(task.description, description);
+        assert_eq!(task.reward_amount, reward_amount);
+        assert_eq!(task.submission_reference, submission_reference);
+        assert_eq!(task.funded_at, funded_at);
+        assert_eq!(task.submission_deadline, submission_deadline);
+        assert_eq!(task.review_deadline, review_deadline);
+    }
+
+    #[test]
+    fn open_task_can_be_cancelled() {
+        let mut task = task_with(TaskStatus::Open, None);
+        assert_cancellation_preserves_task_fields(&mut task);
+    }
+
+    #[test]
+    fn accepted_task_can_be_cancelled() {
+        let mut task = task_with(TaskStatus::Accepted, Some(Pubkey::new_unique()));
+        assert_cancellation_preserves_task_fields(&mut task);
+    }
+
+    #[test]
+    fn funded_task_cannot_be_cancelled() {
+        assert_cancellation_rejected(TaskStatus::Funded);
+    }
+
+    #[test]
+    fn submitted_task_cannot_be_cancelled() {
+        assert_cancellation_rejected(TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn paid_task_cannot_be_cancelled() {
+        assert_cancellation_rejected(TaskStatus::Paid);
+    }
+
+    #[test]
+    fn cancelled_task_cannot_be_cancelled_again() {
+        assert_cancellation_rejected(TaskStatus::Cancelled);
+    }
+
+    fn assert_cancellation_preserves_task_fields(task: &mut Task) {
+        let creator = task.creator;
+        let worker = task.worker;
+        let reward_amount = task.reward_amount;
+        let funded_at = task.funded_at;
+        let submission_reference = task.submission_reference.clone();
+        let submission_deadline = task.submission_deadline;
+        let review_deadline = task.review_deadline;
+
+        task.cancel().unwrap();
+
+        assert!(task.status == TaskStatus::Cancelled);
+        assert_eq!(task.creator, creator);
+        assert_eq!(task.worker, worker);
+        assert_eq!(task.reward_amount, reward_amount);
+        assert_eq!(task.funded_at, funded_at);
+        assert_eq!(task.submission_reference, submission_reference);
+        assert_eq!(task.submission_deadline, submission_deadline);
+        assert_eq!(task.review_deadline, review_deadline);
+    }
+
+    fn assert_cancellation_rejected(status: TaskStatus) {
+        let mut task = task_with(status, Some(Pubkey::new_unique()));
+        let worker = task.worker;
+
+        assert_error(task.cancel(), ErrorCode::InvalidStateTransition);
+        assert!(task.status == status);
+        assert_eq!(task.worker, worker);
+    }
+
+    fn payable_task(worker: Pubkey) -> Task {
+        let mut task = funded_task(worker, 100);
+        task.submit(worker, "ipfs://submission".to_string(), 101)
+            .unwrap();
+        task
+    }
+
+    fn funded_task(worker: Pubkey, funded_at: i64) -> Task {
+        let mut task = task_with(TaskStatus::Accepted, Some(worker));
+        task.fund(funded_at).unwrap();
+        task
     }
 }

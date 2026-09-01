@@ -80,6 +80,8 @@ pub fn handle_create_task(
     task.status = TaskStatus::Open;
     task.submission_reference = None;
     task.funded_at = None;
+    task.submission_deadline = None;
+    task.review_deadline = None;
 
     creator_profile.task_count = task_number;
 

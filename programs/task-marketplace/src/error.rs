@@ -16,4 +16,24 @@ pub enum ErrorCode {
     InvalidTaskNumber,
     #[msg("The signer is not authorized to perform this action")]
     Unauthorized,
+    #[msg("Escrow balance calculation overflowed")]
+    EscrowBalanceOverflow,
+    #[msg("Escrow vault does not contain the required lamports")]
+    EscrowBalanceMismatch,
+    #[msg("Invalid submission reference")]
+    InvalidSubmissionReference,
+    #[msg("Escrow vault version is invalid")]
+    InvalidVaultVersion,
+    #[msg("Escrow vault does not belong to the task")]
+    InvalidVaultTask,
+    #[msg("Escrow liability does not match the task reward")]
+    InvalidEscrowLiability,
+    #[msg("Task deadline calculation overflowed")]
+    DeadlineOverflow,
+    #[msg("The submission window has expired")]
+    SubmissionWindowExpired,
+    #[msg("The submission deadline has not been reached")]
+    SubmissionDeadlineNotReached,
+    #[msg("The review deadline has not been reached")]
+    ReviewDeadlineNotReached,
 }
