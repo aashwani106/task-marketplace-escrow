@@ -16,8 +16,8 @@ use solana_signer::Signer;
 use solana_transaction::{Instruction, InstructionError, Transaction, TransactionError};
 use task_marketplace::{
     accounts, instruction,
-    state::{CreatorProfile, EscrowVault, Task},
-    CREATOR_PROFILE_SEED, ESCROW_VAULT_VERSION, TASK_SEED, VAULT_SEED,
+    state::{CreatorProfile, DisputeOutcome, EscrowVault, Task, TaskResolution},
+    CREATOR_PROFILE_SEED, ESCROW_VAULT_VERSION, TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED,
 };
 
 pub const DEFAULT_BALANCE: u64 = 10_000_000_000;
@@ -77,6 +77,13 @@ pub fn task_pda(creator: &Pubkey, task_number: u64) -> (Pubkey, u8) {
 
 pub fn vault_pda(task: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[VAULT_SEED, task.as_ref()], &task_marketplace::ID)
+}
+
+pub fn task_resolution_pda(task: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[TASK_RESOLUTION_SEED, task.as_ref()],
+        &task_marketplace::ID,
+    )
 }
 
 pub fn create_creator_profile_instruction(creator: Pubkey, creator_profile: Pubkey) -> Instruction {
@@ -151,6 +158,30 @@ pub fn fund_task_instruction(creator: Pubkey, task: Pubkey, escrow_vault: Pubkey
     }
 }
 
+pub fn initialize_task_resolution_instruction(
+    creator: Pubkey,
+    task: Pubkey,
+    task_resolution: Pubkey,
+    arbitration_authority: Pubkey,
+    arbitration_fee_lamports: u64,
+) -> Instruction {
+    Instruction {
+        program_id: task_marketplace::ID,
+        accounts: accounts::InitializeTaskResolution {
+            creator,
+            task,
+            task_resolution,
+            system_program: anchor_lang::system_program::ID,
+        }
+        .to_account_metas(None),
+        data: instruction::InitializeTaskResolution {
+            arbitration_authority,
+            arbitration_fee_lamports,
+        }
+        .data(),
+    }
+}
+
 pub fn pay_task_instruction(
     creator: Pubkey,
     task: Pubkey,
@@ -187,6 +218,94 @@ pub fn refund_task_after_timeout_instruction(
     }
 }
 
+pub fn reject_submission_instruction(
+    creator: Pubkey,
+    task: Pubkey,
+    task_resolution: Pubkey,
+    rejection_reference: String,
+) -> Instruction {
+    Instruction {
+        program_id: task_marketplace::ID,
+        accounts: accounts::RejectSubmission {
+            creator,
+            task,
+            task_resolution,
+        }
+        .to_account_metas(None),
+        data: instruction::RejectSubmission {
+            rejection_reference,
+        }
+        .data(),
+    }
+}
+
+pub fn resolve_dispute_instruction(
+    arbitration_authority: Pubkey,
+    task: Pubkey,
+    creator: Pubkey,
+    worker: Pubkey,
+    task_resolution: Pubkey,
+    escrow_vault: Pubkey,
+    outcome: DisputeOutcome,
+) -> Instruction {
+    Instruction {
+        program_id: task_marketplace::ID,
+        accounts: accounts::ResolveDispute {
+            arbitration_authority,
+            task,
+            creator,
+            worker,
+            task_resolution,
+            escrow_vault,
+        }
+        .to_account_metas(None),
+        data: instruction::ResolveDispute { outcome }.data(),
+    }
+}
+
+pub fn resolve_dispute_by_agreement_instruction(
+    creator: Pubkey,
+    worker: Pubkey,
+    task: Pubkey,
+    task_resolution: Pubkey,
+    escrow_vault: Pubkey,
+    outcome: DisputeOutcome,
+) -> Instruction {
+    Instruction {
+        program_id: task_marketplace::ID,
+        accounts: accounts::ResolveDisputeByAgreement {
+            creator,
+            worker,
+            task,
+            task_resolution,
+            escrow_vault,
+        }
+        .to_account_metas(None),
+        data: instruction::ResolveDisputeByAgreement { outcome }.data(),
+    }
+}
+
+pub fn settle_dispute_after_timeout_instruction(
+    task: Pubkey,
+    creator: Pubkey,
+    worker: Pubkey,
+    task_resolution: Pubkey,
+    escrow_vault: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: task_marketplace::ID,
+        accounts: accounts::SettleDisputeAfterTimeout {
+            task,
+            creator,
+            worker,
+            task_resolution,
+            escrow_vault,
+        }
+        .to_account_metas(None),
+        data: instruction::SettleDisputeAfterTimeout {}.data(),
+    }
+}
+
 pub fn settle_task_after_timeout_instruction(
     task: Pubkey,
     creator: Pubkey,
@@ -200,6 +319,28 @@ pub fn settle_task_after_timeout_instruction(
             creator,
             worker,
             escrow_vault,
+            task_resolution: None,
+        }
+        .to_account_metas(None),
+        data: instruction::SettleTaskAfterTimeout {}.data(),
+    }
+}
+
+pub fn settle_task_after_timeout_with_resolution_instruction(
+    task: Pubkey,
+    creator: Pubkey,
+    worker: Pubkey,
+    escrow_vault: Pubkey,
+    task_resolution: Pubkey,
+) -> Instruction {
+    Instruction {
+        program_id: task_marketplace::ID,
+        accounts: accounts::SettleTaskAfterTimeout {
+            task,
+            creator,
+            worker,
+            escrow_vault,
+            task_resolution: Some(task_resolution),
         }
         .to_account_metas(None),
         data: instruction::SettleTaskAfterTimeout {}.data(),
@@ -318,6 +459,30 @@ pub fn fund_task(svm: &mut LiteSVM, creator: &Keypair, task: Pubkey) -> Pubkey {
     escrow_vault
 }
 
+pub fn initialize_task_resolution(
+    svm: &mut LiteSVM,
+    creator: &Keypair,
+    task: Pubkey,
+    arbitration_authority: Pubkey,
+    arbitration_fee_lamports: u64,
+) -> Pubkey {
+    let (task_resolution, _) = task_resolution_pda(&task);
+    send_instruction(
+        svm,
+        creator,
+        initialize_task_resolution_instruction(
+            creator.pubkey(),
+            task,
+            task_resolution,
+            arbitration_authority,
+            arbitration_fee_lamports,
+        ),
+        &[],
+    )
+    .unwrap();
+    task_resolution
+}
+
 pub fn pay_task(
     svm: &mut LiteSVM,
     creator: &Keypair,
@@ -339,6 +504,27 @@ pub fn submit_task(svm: &mut LiteSVM, worker: &Keypair, task: Pubkey, submission
         svm,
         worker,
         submit_task_instruction(worker.pubkey(), task, submission_reference.to_string()),
+        &[],
+    )
+    .unwrap();
+}
+
+pub fn reject_submission(
+    svm: &mut LiteSVM,
+    creator: &Keypair,
+    task: Pubkey,
+    task_resolution: Pubkey,
+    rejection_reference: &str,
+) {
+    send_instruction(
+        svm,
+        creator,
+        reject_submission_instruction(
+            creator.pubkey(),
+            task,
+            task_resolution,
+            rejection_reference.to_string(),
+        ),
         &[],
     )
     .unwrap();
@@ -370,6 +556,10 @@ pub fn fetch_vault(svm: &LiteSVM, address: &Pubkey) -> EscrowVault {
     fetch_anchor_account(svm, address)
 }
 
+pub fn fetch_task_resolution(svm: &LiteSVM, address: &Pubkey) -> TaskResolution {
+    fetch_anchor_account(svm, address)
+}
+
 pub fn overwrite_task(svm: &mut LiteSVM, address: Pubkey, task: &Task) {
     let mut account = svm.get_account(&address).unwrap();
     let account_size = account.data.len();
@@ -386,6 +576,21 @@ pub fn overwrite_vault(svm: &mut LiteSVM, address: Pubkey, vault: &EscrowVault) 
     let account_size = account.data.len();
     let mut data = Vec::with_capacity(account_size);
     vault.try_serialize(&mut data).unwrap();
+    assert!(data.len() <= account_size);
+    data.resize(account_size, 0);
+    account.data = data;
+    svm.set_account(address, account).unwrap();
+}
+
+pub fn overwrite_task_resolution(
+    svm: &mut LiteSVM,
+    address: Pubkey,
+    task_resolution: &TaskResolution,
+) {
+    let mut account = svm.get_account(&address).unwrap();
+    let account_size = account.data.len();
+    let mut data = Vec::with_capacity(account_size);
+    task_resolution.try_serialize(&mut data).unwrap();
     assert!(data.len() <= account_size);
     data.resize(account_size, 0);
     account.data = data;

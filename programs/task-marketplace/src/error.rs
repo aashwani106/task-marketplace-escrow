@@ -36,4 +36,20 @@ pub enum ErrorCode {
     SubmissionDeadlineNotReached,
     #[msg("The review deadline has not been reached")]
     ReviewDeadlineNotReached,
+    #[msg("The review window has expired")]
+    ReviewWindowExpired,
+    #[msg("Task resolution version is invalid")]
+    InvalidResolutionVersion,
+    #[msg("Task resolution does not belong to the task")]
+    InvalidResolutionTask,
+    #[msg("The arbitration authority is invalid")]
+    InvalidArbitrationAuthority,
+    #[msg("The task resolution state is invalid")]
+    InvalidResolutionState,
+    #[msg("Invalid rejection reference")]
+    InvalidRejectionReference,
+    #[msg("The arbitration deadline has not been reached")]
+    ArbitrationDeadlineNotReached,
+    #[msg("The arbitration window has expired")]
+    ArbitrationWindowExpired,
 }

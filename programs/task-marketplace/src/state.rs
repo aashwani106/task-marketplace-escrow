@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::{
     constants::{
+        ARBITRATION_TIMEOUT_SECONDS, MAX_REJECTION_REFERENCE_LENGTH,
         MAX_SUBMISSION_REFERENCE_LENGTH, REVIEW_TIMEOUT_SECONDS, SUBMISSION_TIMEOUT_SECONDS,
     },
     error::ErrorCode,
@@ -24,6 +25,36 @@ pub struct EscrowVault {
     pub reserved: [u8; 64],
 }
 
+#[account]
+#[derive(InitSpace)]
+pub struct TaskResolution {
+    pub version: u8,
+    pub bump: u8,
+    pub task: Pubkey,
+    pub arbitration_authority: Pubkey,
+    pub arbitration_fee_lamports: u64,
+    pub state: ResolutionState,
+    pub opened_at: Option<i64>,
+    pub arbitration_deadline: Option<i64>,
+    #[max_len(200)]
+    pub rejection_reference: Option<String>,
+    pub outcome: Option<DisputeOutcome>,
+    pub reserved: [u8; 64],
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
+pub enum ResolutionState {
+    Ready,
+    Disputed,
+    Resolved,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
+pub enum DisputeOutcome {
+    PayWorker,
+    RefundCreator,
+}
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
 pub enum TaskStatus {
     Open,
@@ -32,6 +63,8 @@ pub enum TaskStatus {
     Submitted,
     Paid,
     Cancelled,
+    Disputed,
+    Refunded,
 }
 
 impl TaskStatus {
@@ -216,6 +249,46 @@ impl Task {
         self.pay()
     }
 
+    pub fn reject_submission(&mut self, timestamp: i64) -> Result<()> {
+        require!(
+            self.status == TaskStatus::Submitted,
+            ErrorCode::InvalidStateTransition
+        );
+        require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+        require!(
+            self.submission_reference.is_some(),
+            ErrorCode::InvalidStateTransition
+        );
+        let review_deadline = self
+            .review_deadline
+            .ok_or(ErrorCode::InvalidStateTransition)?;
+        require!(timestamp < review_deadline, ErrorCode::ReviewWindowExpired);
+
+        self.status = TaskStatus::Disputed;
+
+        Ok(())
+    }
+
+    pub fn resolve_dispute(&mut self, outcome: DisputeOutcome) -> Result<()> {
+        require!(
+            self.status == TaskStatus::Disputed,
+            ErrorCode::InvalidStateTransition
+        );
+        require!(self.worker.is_some(), ErrorCode::InvalidStateTransition);
+        require!(self.funded_at.is_some(), ErrorCode::InvalidStateTransition);
+        require!(
+            self.submission_reference.is_some(),
+            ErrorCode::InvalidStateTransition
+        );
+
+        self.status = match outcome {
+            DisputeOutcome::PayWorker => TaskStatus::Paid,
+            DisputeOutcome::RefundCreator => TaskStatus::Refunded,
+        };
+
+        Ok(())
+    }
+
     pub fn cancel(&mut self) -> Result<()> {
         require!(
             matches!(self.status, TaskStatus::Open | TaskStatus::Accepted),
@@ -224,6 +297,88 @@ impl Task {
 
         self.status = TaskStatus::Cancelled;
 
+        Ok(())
+    }
+}
+
+impl TaskResolution {
+    pub fn open_dispute(&mut self, timestamp: i64, rejection_reference: String) -> Result<()> {
+        require!(
+            self.state == ResolutionState::Ready,
+            ErrorCode::InvalidResolutionState
+        );
+        require!(self.opened_at.is_none(), ErrorCode::InvalidResolutionState);
+        require!(
+            self.arbitration_deadline.is_none(),
+            ErrorCode::InvalidResolutionState
+        );
+        require!(self.outcome.is_none(), ErrorCode::InvalidResolutionState);
+        require!(
+            !rejection_reference.trim().is_empty()
+                && rejection_reference.len() <= MAX_REJECTION_REFERENCE_LENGTH,
+            ErrorCode::InvalidRejectionReference
+        );
+
+        let arbitration_deadline = timestamp
+            .checked_add(ARBITRATION_TIMEOUT_SECONDS)
+            .ok_or(ErrorCode::DeadlineOverflow)?;
+
+        self.state = ResolutionState::Disputed;
+        self.opened_at = Some(timestamp);
+        self.arbitration_deadline = Some(arbitration_deadline);
+        self.rejection_reference = Some(rejection_reference);
+
+        Ok(())
+    }
+
+    pub fn resolve(&mut self, outcome: DisputeOutcome, timestamp: i64) -> Result<()> {
+        self.require_disputed()?;
+        let arbitration_deadline = self
+            .arbitration_deadline
+            .ok_or(ErrorCode::InvalidResolutionState)?;
+        require!(
+            timestamp < arbitration_deadline,
+            ErrorCode::ArbitrationWindowExpired
+        );
+
+        self.finish(outcome)
+    }
+
+    pub fn resolve_by_agreement(&mut self, outcome: DisputeOutcome) -> Result<()> {
+        self.require_disputed()?;
+        self.finish(outcome)
+    }
+
+    pub fn settle_after_timeout(&mut self, timestamp: i64) -> Result<()> {
+        self.require_disputed()?;
+        let arbitration_deadline = self
+            .arbitration_deadline
+            .ok_or(ErrorCode::InvalidResolutionState)?;
+        require!(
+            timestamp >= arbitration_deadline,
+            ErrorCode::ArbitrationDeadlineNotReached
+        );
+
+        self.finish(DisputeOutcome::PayWorker)
+    }
+
+    fn require_disputed(&self) -> Result<()> {
+        require!(
+            self.state == ResolutionState::Disputed,
+            ErrorCode::InvalidResolutionState
+        );
+        require!(self.opened_at.is_some(), ErrorCode::InvalidResolutionState);
+        require!(
+            self.rejection_reference.is_some(),
+            ErrorCode::InvalidResolutionState
+        );
+        require!(self.outcome.is_none(), ErrorCode::InvalidResolutionState);
+        Ok(())
+    }
+
+    fn finish(&mut self, outcome: DisputeOutcome) -> Result<()> {
+        self.state = ResolutionState::Resolved;
+        self.outcome = Some(outcome);
         Ok(())
     }
 }
@@ -268,11 +423,34 @@ mod tests {
         assert!(TaskStatus::Funded.can_submit());
         assert!(TaskStatus::Submitted.can_pay());
 
-        for terminal_status in [TaskStatus::Paid, TaskStatus::Cancelled] {
+        for terminal_status in [
+            TaskStatus::Paid,
+            TaskStatus::Cancelled,
+            TaskStatus::Disputed,
+            TaskStatus::Refunded,
+        ] {
             assert!(!terminal_status.can_accept());
             assert!(!terminal_status.can_fund());
             assert!(!terminal_status.can_submit());
             assert!(!terminal_status.can_pay());
+        }
+    }
+
+    #[test]
+    fn task_status_variants_are_append_only() {
+        for (status, expected_discriminant) in [
+            (TaskStatus::Open, 0),
+            (TaskStatus::Accepted, 1),
+            (TaskStatus::Funded, 2),
+            (TaskStatus::Submitted, 3),
+            (TaskStatus::Paid, 4),
+            (TaskStatus::Cancelled, 5),
+            (TaskStatus::Disputed, 6),
+            (TaskStatus::Refunded, 7),
+        ] {
+            let mut bytes = Vec::new();
+            status.serialize(&mut bytes).unwrap();
+            assert_eq!(bytes, vec![expected_discriminant]);
         }
     }
 
@@ -331,6 +509,8 @@ mod tests {
             TaskStatus::Submitted,
             TaskStatus::Paid,
             TaskStatus::Cancelled,
+            TaskStatus::Disputed,
+            TaskStatus::Refunded,
         ] {
             let mut task = task_with(status, None);
 
@@ -381,6 +561,8 @@ mod tests {
             TaskStatus::Submitted,
             TaskStatus::Paid,
             TaskStatus::Cancelled,
+            TaskStatus::Disputed,
+            TaskStatus::Refunded,
         ] {
             let mut task = task_with(status, Some(Pubkey::new_unique()));
 
@@ -664,6 +846,8 @@ mod tests {
             TaskStatus::Funded,
             TaskStatus::Paid,
             TaskStatus::Cancelled,
+            TaskStatus::Disputed,
+            TaskStatus::Refunded,
         ] {
             let mut task = payable_task(worker);
             task.status = status;
@@ -757,6 +941,183 @@ mod tests {
     }
 
     #[test]
+    fn submitted_task_can_be_rejected_before_review_deadline() {
+        let worker = Pubkey::new_unique();
+        let mut task = payable_task(worker);
+        let deadline = task.review_deadline.unwrap();
+        let submission_reference = task.submission_reference.clone();
+
+        task.reject_submission(deadline - 1).unwrap();
+
+        assert!(task.status == TaskStatus::Disputed);
+        assert_eq!(task.worker, Some(worker));
+        assert_eq!(task.submission_reference, submission_reference);
+        assert_eq!(task.review_deadline, Some(deadline));
+    }
+
+    #[test]
+    fn rejection_at_review_deadline_is_rejected_without_mutation() {
+        let worker = Pubkey::new_unique();
+        let mut task = payable_task(worker);
+        let deadline = task.review_deadline.unwrap();
+
+        assert_error(
+            task.reject_submission(deadline),
+            ErrorCode::ReviewWindowExpired,
+        );
+        assert!(task.status == TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn only_submitted_tasks_can_be_disputed() {
+        for status in [
+            TaskStatus::Open,
+            TaskStatus::Accepted,
+            TaskStatus::Funded,
+            TaskStatus::Paid,
+            TaskStatus::Cancelled,
+            TaskStatus::Disputed,
+            TaskStatus::Refunded,
+        ] {
+            let mut task = payable_task(Pubkey::new_unique());
+            task.status = status;
+
+            assert_error(
+                task.reject_submission(task.review_deadline.unwrap() - 1),
+                ErrorCode::InvalidStateTransition,
+            );
+            assert!(task.status == status);
+        }
+    }
+
+    #[test]
+    fn dispute_outcome_sets_only_the_terminal_status() {
+        for (outcome, expected_status) in [
+            (DisputeOutcome::PayWorker, TaskStatus::Paid),
+            (DisputeOutcome::RefundCreator, TaskStatus::Refunded),
+        ] {
+            let worker = Pubkey::new_unique();
+            let mut task = payable_task(worker);
+            task.status = TaskStatus::Disputed;
+            let reference = task.submission_reference.clone();
+
+            task.resolve_dispute(outcome).unwrap();
+
+            assert!(task.status == expected_status);
+            assert_eq!(task.worker, Some(worker));
+            assert_eq!(task.submission_reference, reference);
+        }
+    }
+
+    #[test]
+    fn dispute_resolution_replay_is_rejected() {
+        let mut task = payable_task(Pubkey::new_unique());
+        task.status = TaskStatus::Disputed;
+        task.resolve_dispute(DisputeOutcome::PayWorker).unwrap();
+
+        assert_error(
+            task.resolve_dispute(DisputeOutcome::RefundCreator),
+            ErrorCode::InvalidStateTransition,
+        );
+        assert!(task.status == TaskStatus::Paid);
+    }
+
+    #[test]
+    fn task_resolution_opens_and_records_deadline() {
+        let mut resolution = ready_resolution();
+
+        resolution
+            .open_dispute(100, "ipfs://rejection".to_string())
+            .unwrap();
+
+        assert!(resolution.state == ResolutionState::Disputed);
+        assert_eq!(resolution.opened_at, Some(100));
+        assert_eq!(
+            resolution.arbitration_deadline,
+            Some(100 + ARBITRATION_TIMEOUT_SECONDS)
+        );
+        assert_eq!(
+            resolution.rejection_reference,
+            Some("ipfs://rejection".to_string())
+        );
+        assert_eq!(resolution.outcome, None);
+    }
+
+    #[test]
+    fn invalid_rejection_references_are_rejected() {
+        for reference in ["".to_string(), "   ".to_string(), "r".repeat(201)] {
+            let mut resolution = ready_resolution();
+
+            assert_error(
+                resolution.open_dispute(100, reference),
+                ErrorCode::InvalidRejectionReference,
+            );
+            assert!(resolution.state == ResolutionState::Ready);
+            assert_eq!(resolution.opened_at, None);
+        }
+    }
+
+    #[test]
+    fn arbitration_deadline_overflow_is_atomic() {
+        let mut resolution = ready_resolution();
+
+        assert_error(
+            resolution.open_dispute(i64::MAX, "ipfs://rejection".to_string()),
+            ErrorCode::DeadlineOverflow,
+        );
+        assert!(resolution.state == ResolutionState::Ready);
+        assert_eq!(resolution.arbitration_deadline, None);
+    }
+
+    #[test]
+    fn arbitrator_must_resolve_before_deadline() {
+        let mut resolution = disputed_resolution(100);
+        let deadline = resolution.arbitration_deadline.unwrap();
+
+        resolution
+            .resolve(DisputeOutcome::RefundCreator, deadline - 1)
+            .unwrap();
+        assert!(resolution.state == ResolutionState::Resolved);
+        assert_eq!(resolution.outcome, Some(DisputeOutcome::RefundCreator));
+
+        let mut resolution = disputed_resolution(100);
+        assert_error(
+            resolution.resolve(DisputeOutcome::PayWorker, deadline),
+            ErrorCode::ArbitrationWindowExpired,
+        );
+        assert!(resolution.state == ResolutionState::Disputed);
+        assert_eq!(resolution.outcome, None);
+    }
+
+    #[test]
+    fn agreement_can_resolve_either_outcome() {
+        for outcome in [DisputeOutcome::PayWorker, DisputeOutcome::RefundCreator] {
+            let mut resolution = disputed_resolution(100);
+
+            resolution.resolve_by_agreement(outcome).unwrap();
+
+            assert!(resolution.state == ResolutionState::Resolved);
+            assert_eq!(resolution.outcome, Some(outcome));
+        }
+    }
+
+    #[test]
+    fn dispute_timeout_is_worker_default_at_boundary() {
+        let mut resolution = disputed_resolution(100);
+        let deadline = resolution.arbitration_deadline.unwrap();
+
+        assert_error(
+            resolution.settle_after_timeout(deadline - 1),
+            ErrorCode::ArbitrationDeadlineNotReached,
+        );
+        assert!(resolution.state == ResolutionState::Disputed);
+
+        resolution.settle_after_timeout(deadline).unwrap();
+        assert!(resolution.state == ResolutionState::Resolved);
+        assert_eq!(resolution.outcome, Some(DisputeOutcome::PayWorker));
+    }
+
+    #[test]
     fn open_task_can_be_cancelled() {
         let mut task = task_with(TaskStatus::Open, None);
         assert_cancellation_preserves_task_fields(&mut task);
@@ -829,5 +1190,29 @@ mod tests {
         let mut task = task_with(TaskStatus::Accepted, Some(worker));
         task.fund(funded_at).unwrap();
         task
+    }
+
+    fn ready_resolution() -> TaskResolution {
+        TaskResolution {
+            version: 1,
+            bump: 255,
+            task: Pubkey::new_unique(),
+            arbitration_authority: Pubkey::new_unique(),
+            arbitration_fee_lamports: 0,
+            state: ResolutionState::Ready,
+            opened_at: None,
+            arbitration_deadline: None,
+            rejection_reference: None,
+            outcome: None,
+            reserved: [0; 64],
+        }
+    }
+
+    fn disputed_resolution(timestamp: i64) -> TaskResolution {
+        let mut resolution = ready_resolution();
+        resolution
+            .open_dispute(timestamp, "ipfs://rejection".to_string())
+            .unwrap();
+        resolution
     }
 }

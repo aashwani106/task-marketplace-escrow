@@ -1,12 +1,13 @@
 use anchor_lang::prelude::*;
 
 use crate::{
-    constants::{TASK_SEED, VAULT_SEED},
+    constants::{TASK_RESOLUTION_SEED, TASK_SEED, VAULT_SEED},
     error::ErrorCode,
-    state::{EscrowVault, Task},
+    state::{EscrowVault, ResolutionState, Task, TaskResolution},
 };
 
 use super::escrow::{pay_worker, validate_escrow};
+use super::resolution::validate_task_resolution;
 
 #[derive(Accounts)]
 pub struct SettleTaskAfterTimeout<'info> {
@@ -39,6 +40,12 @@ pub struct SettleTaskAfterTimeout<'info> {
         close = creator
     )]
     pub escrow_vault: Account<'info, EscrowVault>,
+
+    #[account(
+        seeds = [TASK_RESOLUTION_SEED, task.key().as_ref()],
+        bump = task_resolution.bump
+    )]
+    pub task_resolution: Option<Account<'info, TaskResolution>>,
 }
 
 pub fn handle_settle_task_after_timeout(ctx: Context<SettleTaskAfterTimeout>) -> Result<()> {
@@ -48,6 +55,13 @@ pub fn handle_settle_task_after_timeout(ctx: Context<SettleTaskAfterTimeout>) ->
         ctx.accounts.worker.key(),
         ErrorCode::Unauthorized
     );
+    if let Some(task_resolution) = &ctx.accounts.task_resolution {
+        validate_task_resolution(&ctx.accounts.task, task_resolution)?;
+        require!(
+            task_resolution.state == ResolutionState::Ready,
+            ErrorCode::InvalidResolutionState
+        );
+    }
 
     let timestamp = Clock::get()?.unix_timestamp;
     ctx.accounts.task.pay_after_timeout(timestamp)?;
